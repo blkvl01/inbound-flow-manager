@@ -1,0 +1,95 @@
+# Local configuration and credentials
+config.json
+.env
+.env.*
+!.env.example
+.claude/
+
+# Operational data and shared runtime state
+_shared_state/
+outputs/
+_oracle_shadow_trial/
+_test_tmp/
+aktiv_uld_lista.txt
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated documentation and screenshots that may contain live data
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.docx
+/_*.png
+/_*.jpg
+/_*.jpeg
+
+# Local AI handoffs, probes, logs, and temporary files
+.ai/
+_codex_*/
+_codex_*
+_app_*
+_dev_*
+_probe_*
+_shot_*
+_kpi_*
+_tv_*
+_cdp.py
+_strip.py
+*.log
+*.tmp
+*.bak
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+Python/
+
+# Builds, packaged runtimes, and release backups
+build/
+build_*/
+dist/
+dist_*/
+_mapping_build_verify_*/
+_oracle_build_verify_*/
+release_backups/
+_release_backups/
+*.exe
+*.dll
+*.pyd
+*.pkg
+*.pyz
+*.zip
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Known stray local artifact
+/P
+
+# Live Oracle reconciliation evidence stays local, including future revisions.
+/docs/oracle_head_detail_discrepancies.md
+.cloud-state/
