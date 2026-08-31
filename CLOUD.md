@@ -27,6 +27,7 @@ a felhős teszt nem helyettesíti a kész EXE és az üzemi környezet ellenőrz
 
 - Helyi munkamappa: `C:\Inbound Flow Manager`.
 - A Codex GitHub mentés az engedélyezett forrásfájlokat a `main` ágra menti.
+- Az állapotablakban a projekt neve: **Inbound Flow Manager**.
 - Kikapcsolás előtt várd meg a friss „Minden feltöltve” állapotot.
 - A telefonos/felhős munka eredményét ellenőrzés után olvaszd be a `main` ágba.
 - A laptopon mentsd és zárd be a szerkesztőt, majd az állapotablakban válaszd
