@@ -17,7 +17,6 @@ Format:
 """
 import json
 import logging
-import msvcrt
 import os
 import shutil
 import socket
@@ -27,6 +26,11 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from data_reader import _normalize_uld_code
 
@@ -418,7 +422,10 @@ def _acquire_lock():
             handle = open(lock, "a+b")
             handle.seek(0)
             try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 handle.close()
                 handle = None
@@ -451,7 +458,10 @@ def _release_lock():
         if handle:
             try:
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
                 handle.close()
                 _LOCK_LOCAL.handle = None
