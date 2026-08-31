@@ -34,6 +34,9 @@ a felhős teszt nem helyettesíti a kész EXE és az üzemi környezet ellenőrz
   a Flow Managert és a „Felhős változások átvétele” gombot.
 - Ha mindkét oldalon változtattál, az automatika megáll; mindkét munka megmarad.
 
+Átvétel után frissen nyisd meg a helyi forrásfájlt. Egy korábbról nyitva maradt
+szerkesztőlap régi tartalmát ne mentsd rá a GitHubról érkezett változatra.
+
 Az üzemi config.json, Excel-, adatbázis-, állapot-, napló- és kiadási fájlok,
 a valódi Oracle-eltéréslista és az operatív képernyőképek helyben maradnak.
 Új adat-, JSON- vagy médiafájl külön ellenőrzést igényel; nem automatikus feltöltés.
