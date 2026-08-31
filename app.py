@@ -36,6 +36,7 @@ if getattr(sys, "frozen", False):
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 from flask import request
 
