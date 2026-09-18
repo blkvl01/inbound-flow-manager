@@ -8719,8 +8719,6 @@ def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
     status       = state["status"]
     refresh_count = state.get("refresh_count", 0)
     refreshing   = state.get("refreshing", False)
-    update_phase = updater.get_status().get("phase")
-    update_active = update_phase in {"checking", "downloading", "installing"}
 
     if priority_test_mode:
         # Test data is deliberately independent from the source read. Operators
@@ -8728,7 +8726,7 @@ def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
         new_state = "test"
         new_cls = no_update
         new_style = {"display": "none"}
-    elif (status == "loading" and refresh_count == 0) or update_active:
+    elif status == "loading" and refresh_count == 0:
         # First load — compact progress panel over the existing UI.
         new_state = "first"
         new_cls   = "loading-overlay loading-first"
@@ -8768,7 +8766,7 @@ def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
 def update_loading_progress(_poll):
     state = data_cache.get_state()
     update = updater.get_status()
-    if update.get("phase") in {"checking", "downloading", "installing"}:
+    if update.get("phase") in {"checking", "downloading", "verifying", "installing"}:
         progress = max(0, min(99, int(update.get("progress") or 1)))
         stage = str(update.get("message") or "GitHub Releases ellenőrzése")
     else:

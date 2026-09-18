@@ -15,9 +15,13 @@ from scripts.verify_release import verify_release_directory
 class _Response:
     def __init__(self, payload):
         self.payload = payload
+        self._read_once = False
 
     def read(self, _size=-1):
         if isinstance(self.payload, bytes):
+            if self._read_once:
+                return b""
+            self._read_once = True
             return self.payload
         return json.dumps(self.payload).encode("utf-8")
 
@@ -91,6 +95,24 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"current")
             self.assertEqual(updater.get_status()["phase"], "offline")
 
+    def test_download_reports_hash_verification_instead_of_stopping_at_95_percent(self):
+        release_json, manifest, exe_bytes = _release_payload()
+        _ = release_json
+        release = updater.parse_release_payload({
+            **release_json,
+            "_manifest": manifest,
+        })
+        with tempfile.TemporaryDirectory() as temp:
+            stage = updater._download_to_stage(
+                release,
+                Path(temp),
+                opener=lambda *_args, **_kwargs: _Response(exe_bytes),
+            )
+            self.assertEqual(stage.read_bytes(), exe_bytes)
+            self.assertEqual(updater.get_status()["phase"], "verifying")
+            self.assertGreaterEqual(updater.get_status()["progress"], 96)
+            stage.unlink()
+
     def test_automatic_onedrive_workspace_discovery_uses_available_company_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "Ecommerce - Documents"
@@ -126,6 +148,21 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(values[1], "47%")
         self.assertEqual(values[2], {"width": "47%"})
         self.assertEqual(values[3], "47")
+
+    def test_update_overlay_does_not_block_ready_app_when_download_is_slow(self):
+        import app
+
+        with patch.object(app.data_cache, "get_state", return_value={
+            "status": "ready",
+            "refresh_count": 1,
+            "refreshing": False,
+        }), patch.object(updater, "_status", {
+            "phase": "downloading", "message": "Új Flow Manager letöltése",
+            "progress": 95, "version": "1.0.0", "available_version": "1.1.0",
+        }):
+            values = app.update_overlay(0, None, None, False, "first")
+        self.assertEqual(values[1], {"display": "none"})
+        self.assertEqual(values[2], "done")
 
     def test_release_directory_is_onefile_only_and_hash_matches(self):
         with tempfile.TemporaryDirectory() as temp:
