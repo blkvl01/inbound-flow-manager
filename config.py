@@ -40,6 +40,73 @@ def _find_onedrive_folder() -> str:
     return os.path.join(_onedrive_roots()[0], candidates[0])
 
 
+def _shared_state_candidates() -> list[Path]:
+    """Return the existing-company-workspace candidates for shared state.
+
+    The executable is distributed separately from OneDrive.  Shared state is
+    therefore looked up only in the user's existing company OneDrive tree; no
+    project folder is created as part of discovery.
+    """
+    candidates: list[Path] = []
+    for root in _onedrive_roots():
+        for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
+            candidate = (
+                Path(root)
+                / documents_name
+                / "Program HUB"
+                / "Flow Manager"
+            )
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _find_shared_state_folder() -> str:
+    """Return the first existing shared-state folder, or an empty string.
+
+    Both the Hungarian and English OneDrive folder names are supported.  An
+    empty result is intentional: callers can then ask the user to select an
+    existing folder instead of inventing a path or creating directories.
+    """
+    for candidate in _shared_state_candidates():
+        if candidate.is_dir():
+            return str(candidate)
+    return ""
+
+
+def _is_legacy_shared_state_path(path: str) -> bool:
+    """Identify the old project-owned OneDrive state folder from prior builds."""
+    candidate = os.path.normcase(os.path.abspath(str(path)))
+    for root in _onedrive_roots():
+        for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
+            legacy = Path(root) / documents_name / "Flow Manager" / "_shared_state"
+            if candidate == os.path.normcase(os.path.abspath(str(legacy))):
+                return True
+    return False
+
+
+def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
+    """Copy durable shared records into the existing new workspace once.
+
+    The old directory is deliberately retained for recovery.  Machine-local
+    dashboard caches, lock files and corrupt snapshots are not copied.
+    """
+    if not source.is_dir() or not target.is_dir():
+        return
+    for item in source.iterdir():
+        if not item.is_file():
+            continue
+        if not (item.name.endswith(".shared.json") or item.name.startswith("activity_")):
+            continue
+        destination = target / item.name
+        if destination.exists():
+            continue
+        try:
+            shutil.copy2(item, destination)
+        except OSError as exc:
+            print(f"  [!] Legacy shared-state migration skipped for {item.name}: {exc}", flush=True)
+
+
 _DEFAULT = {
     "ecomm_file":               rf"{_find_onedrive_folder()}\E_COMM nyomonkövetés_24.xlsb",
     "pallets_file":             rf"{_find_onedrive_folder()}\BUD-Pallets.xlsm",
@@ -154,6 +221,42 @@ def _pick_files_gui(cfg: dict, cfg_path: Path) -> dict:
     return cfg
 
 
+def _ensure_shared_state_config(cfg: dict, cfg_path: Path) -> dict:
+    """Resolve shared state without creating a OneDrive/project directory."""
+    configured = str(cfg.get("shared_state_dir") or "").strip().strip('"')
+    automatic = _find_shared_state_folder()
+    if configured and _is_legacy_shared_state_path(configured) and automatic:
+        _migrate_legacy_shared_state(Path(configured), Path(automatic))
+        cfg["shared_state_dir"] = ""
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        print("  [OK] Legacy shared-state path migrated to the existing Program HUB workspace.", flush=True)
+        return cfg
+
+    if configured and os.path.isdir(configured):
+        return cfg
+
+    if automatic:
+        print(f"  [OK] Kozos allapotmappa automatikusan: {automatic}", flush=True)
+        return cfg
+
+    # Source/test runs should remain non-interactive.  The frozen desktop
+    # application is the only place where the startup folder picker is shown.
+    if not getattr(sys, "frozen", False):
+        return cfg
+
+    print("  [!] Kozos allapotmappa nem talalhato - mappavalaszto indul...", flush=True)
+    selected = pick_shared_directory(configured or None)
+    if selected:
+        cfg["shared_state_dir"] = selected
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        print(f"  [OK] Kozos allapotmappa kivalasztva: {selected}", flush=True)
+    else:
+        print("  [!] Kozos allapotmappa kivalasztasa megszakitva; helyi tartalek hasznalata.", flush=True)
+    return cfg
+
+
 def _load() -> dict:
     cfg_path = get_config_path()
     if cfg_path.exists():
@@ -183,6 +286,8 @@ def _load() -> dict:
     if files_missing:
         print("  [!] Egy vagy tobb forras fajl nem talalhato - fajlvalaszto indul...", flush=True)
         cfg = _pick_files_gui(cfg, cfg_path)
+
+    cfg = _ensure_shared_state_config(cfg, cfg_path)
 
     return cfg
 
@@ -225,7 +330,12 @@ def pick_shared_directory(current_path: str | None = None) -> str:
 
     initial_dir = str(current_path or "").strip().strip('"')
     if not os.path.isdir(initial_dir):
-        initial_dir = _find_onedrive_folder()
+        for candidate in _shared_state_candidates():
+            if candidate.parent.is_dir():
+                initial_dir = str(candidate.parent)
+                break
+        else:
+            initial_dir = _find_onedrive_folder()
 
     root = tk.Tk()
     root.withdraw()

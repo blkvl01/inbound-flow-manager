@@ -8,14 +8,13 @@ setlocal
 ::  Mit csinal:
 ::   1. A FlowManager mappat bemasolia a sajat gepedre (%LOCALAPPDATA%)
 ::      -- csak a megvaltozott fajlokat masolja (gyors, robocopy)
-::   2. Beallitja, hogy a kozos "Betarolt tetelek" allapot
-::      a SharePoint mappaban maradjon (nem a helyi masolt)
+::   2. A fagyasztott EXE sajat automatikus shared_state-felderitese
+::      valasztja ki a mar letezo Program HUB\Flow Manager mappat.
 ::   3. Elinditja az appot a helyi masoltbol (nincs file-lock)
 :: ============================================================
 
 set "SHAREPOINT_DIR=%~dp0"
 set "SRC_APP=%SHAREPOINT_DIR%FlowManager"
-set "SHARED_STATE=%SHAREPOINT_DIR%_shared_state"
 set "LOCAL_APP=%LOCALAPPDATA%\InboundFlowManager\bin"
 set "LOCAL_EXE=%LOCAL_APP%\FlowManager.exe"
 
@@ -51,13 +50,6 @@ if %ERRORLEVEL% GEQ 8 (
     pause
     exit /b 1
 )
-
-:: --- Kozos shared state mutatasa a SharePoint mappara ---
-set "FLOW_SHARED_STATE_DIR=%SHARED_STATE%"
-
-:: --- Felhasznalonev-specifikus config a SharePoint mappara ---
-::     Ha a user mas gepen jelentkezik be, a beallitasai megmaradnak.
-set "FLOW_USER_CONFIG_DIR=%SHAREPOINT_DIR%_userconfig"
 
 :: --- Inditas a helyi masoltbol ---
 echo  Inditas: %LOCAL_EXE%

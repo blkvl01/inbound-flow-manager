@@ -61,13 +61,13 @@ def _shared_base_dir() -> Path:
     # frozen EXE is used and no explicit override was supplied.
     if getattr(sys, "frozen", False):
         try:
-            from config import _find_onedrive_folder
+            from config import _find_shared_state_folder
 
-            onedrive_folder = Path(_find_onedrive_folder())
-            if onedrive_folder.is_dir():
+            shared_state_folder = _find_shared_state_folder()
+            if shared_state_folder:
                 # Use the existing operational workspace directly. Do not
                 # create a project-owned OneDrive subdirectory.
-                return onedrive_folder
+                return Path(shared_state_folder)
         except (OSError, ImportError) as exc:
             log.warning("Automatic OneDrive shared-state discovery failed: %s", exc)
 
