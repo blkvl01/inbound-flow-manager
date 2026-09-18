@@ -189,6 +189,8 @@ class UpdaterTests(unittest.TestCase):
         build = Path("build.bat").read_text(encoding="utf-8")
         self.assertIn("a.binaries", spec)
         self.assertNotIn("COLLECT(", spec)
+        self.assertIn("flow_manager_version.txt", spec)
+        self.assertIn("write_build_version.py", build)
         self.assertIn("--onefile", build)
         self.assertIn("release\\FlowManager.exe", build)
 

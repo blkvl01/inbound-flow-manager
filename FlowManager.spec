@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('assets', 'assets')]
+datas = [('assets', 'assets'), ('flow_manager_version.txt', '.')]
 binaries = []
 hiddenimports = ['pyxlsb', 'openpyxl', 'openpyxl.styles', 'openpyxl.utils', 'oracledb', 'cryptography.hazmat.primitives.kdf', 'pandas', 'pandas.io.formats.style', 'flask', 'flask_compress', 'multiprocessing']
 datas += copy_metadata('plotly')

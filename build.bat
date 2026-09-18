@@ -61,14 +61,21 @@ echo  [4/4] Build inditasa...
 echo        Regi dist/build mappak torlese...
 if exist dist  rmdir /s /q dist
 if exist build rmdir /s /q build
+python scripts\write_build_version.py --version "%FLOW_MANAGER_VERSION%" --output "flow_manager_version.txt"
+if errorlevel 1 (
+    echo  [HIBA] A build verzio fajl letrehozasa sikertelen.
+    exit /b 1
+)
 echo        PyInstaller futtatasa (ez 2-5 percet vehet igenybe)...
 echo.
 
 set "FLOW_MANAGER_VERSION=%FLOW_MANAGER_VERSION%"
 :: A FlowManager.spec EXE konfiguracioja PyInstaller --onefile modot hasznal.
 python -m PyInstaller --clean --noconfirm FlowManager.spec
+set "PYINSTALLER_EXIT=%ERRORLEVEL%"
+if exist flow_manager_version.txt del /q flow_manager_version.txt
 
-if errorlevel 1 (
+if not "%PYINSTALLER_EXIT%"=="0" (
     echo.
     echo  [HIBA] PyInstaller build sikertelen. Nezd meg a fenti hibauzeneteket.
     pause

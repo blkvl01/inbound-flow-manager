@@ -79,6 +79,7 @@ _release_backups/
 *.pkg
 *.pyz
 *.zip
+/flow_manager_version.txt
 
 # Editor and OS metadata
 .vscode/
