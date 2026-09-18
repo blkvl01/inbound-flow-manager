@@ -9938,8 +9938,9 @@ _SERVER_HOST = "127.0.0.1"
 # Runtime activity tracking
 # ---------------------------------------------------------------------------
 
-_INACTIVITY_SHUTDOWN_SECONDS = 30 * 60
-_NO_POST_SHUTDOWN_SECONDS = 30 * 60
+_INACTIVITY_TIMEOUT_MINUTES = 30
+_INACTIVITY_SHUTDOWN_SECONDS = _INACTIVITY_TIMEOUT_MINUTES * 60
+_NO_POST_SHUTDOWN_SECONDS = _INACTIVITY_TIMEOUT_MINUTES * 60
 _last_poll_time: list[float] = [0.0]  # updated by update_dashboard on every poll
 _last_post_time: list[float] = [time.time()]
 _last_user_activity_time: list[float] = [time.time()]
@@ -9952,15 +9953,15 @@ def _shutdown_watchdog():
         time.sleep(15)
         post_idle_seconds = time.time() - _last_post_time[0]
         if post_idle_seconds >= _NO_POST_SHUTDOWN_SECONDS:
-            print("\n  30 perc POST nelkuli allapot - szerver leallitasa...", flush=True)
-            activity_log.log_session_end("30 perc POST hiány")
+            print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc POST nelkuli allapot - szerver leallitasa...", flush=True)
+            activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc POST hiány")
             time.sleep(0.5)
             os._exit(0)
 
         idle_seconds = time.time() - _last_user_activity_time[0]
         if idle_seconds >= _INACTIVITY_SHUTDOWN_SECONDS:
-            print("\n  30 perc bongeszo inaktivitas - szerver leallitasa...", flush=True)
-            activity_log.log_session_end("30 perc inaktivitás")
+            print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc bongeszo inaktivitas - szerver leallitasa...", flush=True)
+            activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc inaktivitás")
             time.sleep(0.5)
             os._exit(0)
 
@@ -10035,7 +10036,11 @@ if __name__ == "__main__":
 
     print(flush=True)
     print(f"  -> Megnyitás:  http://127.0.0.1:{PORT}", flush=True)
-    print("  -> Leállítás:  Ctrl+C, CMD ablak bezárása, 30 perc POST hiány vagy 30 perc böngésző inaktivitás", flush=True)
+    print(
+        f"  -> Leállítás:  Ctrl+C, CMD ablak bezárása, {_INACTIVITY_TIMEOUT_MINUTES} perc POST hiány "
+        f"vagy {_INACTIVITY_TIMEOUT_MINUTES} perc böngésző inaktivitás",
+        flush=True,
+    )
     print(flush=True)
 
     app.run(debug=False, port=PORT, host=_SERVER_HOST, use_reloader=False, threaded=True)

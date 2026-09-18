@@ -3,6 +3,9 @@
 A kiadás egyetlen futtatható fájlja a `FlowManager.exe`. A program a közös
 Excel/OneDrive munkateret nem módosítja és nem igényel `_internal` mappát.
 
+Az automatikus leállítás csak 30 perc POST- és böngésző-inaktivitás után
+történik.
+
 Kiadási assetek:
 
 - `FlowManager.exe`

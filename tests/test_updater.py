@@ -164,6 +164,13 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(values[1], {"display": "none"})
         self.assertEqual(values[2], "done")
 
+    def test_inactivity_shutdown_is_configured_for_thirty_minutes(self):
+        import app
+
+        self.assertEqual(app._INACTIVITY_TIMEOUT_MINUTES, 30)
+        self.assertEqual(app._INACTIVITY_SHUTDOWN_SECONDS, 30 * 60)
+        self.assertEqual(app._NO_POST_SHUTDOWN_SECONDS, 30 * 60)
+
     def test_release_directory_is_onefile_only_and_hash_matches(self):
         with tempfile.TemporaryDirectory() as temp:
             release = Path(temp)
