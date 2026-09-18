@@ -179,7 +179,7 @@ Tabok:
 ## Tevékenységnapló
 
 Fájl: `activity_log.py`
-Storage: `_shared_state/activity_logs/activity_YYYY-MM-DD.jsonl`, 30 nap retenció
+Storage: a közös munkamappa gyökerében `activity_YYYY-MM-DD.jsonl`, 30 nap retenció
 (induláskor takarít). A logolás soha nem dobhat hibát és nem blokkol (2s lock
 timeout, hiba esetén az esemény eldobódik).
 

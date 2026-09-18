@@ -1,0 +1,26 @@
+{
+  "repository": "blkvl01/inbound-flow-manager",
+  "build": {
+    "command": "build.bat <version>",
+    "cwd": "."
+  },
+  "test": {
+    "command": "python scripts/codex-test.py",
+    "cwd": "."
+  },
+  "version": {
+    "source": "version.py",
+    "pattern": "APP_VERSION\\s*="
+  },
+  "assets": [
+    "release/FlowManager.exe",
+    "release/manifest.json"
+  ],
+  "manifest": {
+    "enabled": true,
+    "name": "manifest.json"
+  },
+  "distribution": {
+    "must_be_public": true
+  }
+}

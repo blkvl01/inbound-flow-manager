@@ -228,11 +228,14 @@ body.view-kpi-switching .bg-orbs::after { animation: viewSwitchVeil 0.76s ease b
   overflow: hidden;
 }
 
-/* ── First-load: full glass overlay ── */
+/* First load leaves the surrounding interface visible for context. */
 .loading-overlay.loading-first {
-  background: rgba(9, 11, 26, 0.84);
-  animation: lIn 0.55s ease both;
+  background: rgba(9, 11, 26, 0.58);
+  animation: lIn 0.24s ease both;
 }
+.l-first-wrap { width: 100%; display: flex; justify-content: center; }
+.loading-first .l-refresh-wrap { display: none; }
+.loading-refresh .l-first-wrap { display: none; }
 
 
 /* ── Refresh: blocking. A real data read must not allow operators to act on
@@ -251,248 +254,142 @@ body.view-kpi-switching .bg-orbs::after { animation: viewSwitchVeil 0.76s ease b
   pointer-events: none !important;
 }
 
-/* ─ Orbs ─ */
-.l-orb {
-  position: absolute; border-radius: 50%;
-  filter: blur(80px); pointer-events: none;
-  will-change: transform;
-}
-.l-orb-1 {
-  width: 520px; height: 520px;
-  background: radial-gradient(circle, rgba(90,34,0,0.60) 0%, transparent 70%);
-  top: -130px; left: -150px;
-  animation: lOrb1 9s ease-in-out infinite;
-}
-.l-orb-2 {
-  width: 460px; height: 460px;
-  background: radial-gradient(circle, rgba(38,12,96,0.62) 0%, transparent 70%);
-  bottom: -110px; right: -130px;
-  animation: lOrb2 11s ease-in-out infinite;
-}
-.l-orb-3 {
-  width: 320px; height: 320px;
-  background: radial-gradient(circle, rgba(0,68,60,0.48) 0%, transparent 70%);
-  top: 36%; right: 10%;
-  animation: lOrb3 7.5s ease-in-out infinite;
-}
-
-/* ─ Glass card ─ */
+/* Compact first-load panel over the existing Flow Manager UI. */
 .l-card {
-  position: relative; z-index: 10;
-  display: flex; flex-direction: column;
-  align-items: center; gap: 26px;
-  padding: 48px 60px 44px;
-  min-width: 300px; max-width: 440px;
-  border-radius: 24px;
-  background: rgba(255,255,255,0.040);
-  border: 1px solid rgba(255,255,255,0.10);
-  backdrop-filter: blur(48px) saturate(160%);
-  -webkit-backdrop-filter: blur(48px) saturate(160%);
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.13),
-    0 32px 80px rgba(0,0,0,0.48),
-    0 0 0 1px rgba(255,255,255,0.05);
-  animation: lCardRise 0.60s cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.12s both;
-  will-change: transform;
-  transition: transform 0.10s ease, box-shadow 0.10s ease;
+  position: relative;
+  width: min(440px, calc(100vw - 32px));
+  padding: 27px 28px 22px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 18px;
+  background: linear-gradient(155deg, rgba(27,34,49,.98), rgba(14,19,32,.98));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 24px 64px rgba(0,0,0,.36);
+  color: #f5f7fb;
+  animation: lCardEnter .34s cubic-bezier(.22,1,.36,1) both;
 }
-
-/* Cursor-following radial shine via JS → --sx --sy */
-.l-card::after {
-  content: ''; position: absolute; inset: 0;
-  border-radius: inherit; pointer-events: none; z-index: 1;
-  background: radial-gradient(
-    circle 180px at var(--sx, 50%) var(--sy, 50%),
-    rgba(255,255,255,0.09) 0%, transparent 68%
-  );
-  transition: background 0.08s linear;
+.l-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #ff6b35 45%, transparent);
+  opacity: .72;
+  animation: lEdgeSweep 2.8s cubic-bezier(.45,0,.55,1) infinite;
+  pointer-events: none;
 }
-
-
-/* ─ Title ─ */
-.l-logo { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.l-brand { display: flex; align-items: center; gap: 10px; }
+.l-brand-mark {
+  width: 5px; height: 20px; border-radius: 3px;
+  background: #ff6b35;
+  box-shadow: 0 0 15px rgba(255,107,53,.33);
+}
 .l-title {
-  display: flex; gap: 0;
-  font-size: 22px; font-weight: 700;
-  letter-spacing: 0.20em; text-transform: uppercase;
-  color: var(--text-primary);
+  color: #f5f7fb; font-size: 14px; line-height: 1.2;
+  font-weight: 750; letter-spacing: .09em; text-transform: uppercase;
 }
-.l-title .ll {
-  display: inline-block;
-  animation: lLetterDrop 0.42s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+.l-progress-head {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  gap: 16px; margin-top: 32px;
 }
-.l-title .ll-sp { width: 0.55em; }
-.l-title .ll:nth-child(1)  { animation-delay: 0.26s; }
-.l-title .ll:nth-child(2)  { animation-delay: 0.31s; }
-.l-title .ll:nth-child(3)  { animation-delay: 0.35s; }
-.l-title .ll:nth-child(4)  { animation-delay: 0.39s; }
-.l-title .ll:nth-child(5)  { animation-delay: 0.43s; }
-.l-title .ll:nth-child(6)  { animation-delay: 0.50s; }
-.l-title .ll:nth-child(7)  { animation-delay: 0.54s; }
-.l-title .ll:nth-child(8)  { animation-delay: 0.58s; }
-.l-title .ll:nth-child(9)  { animation-delay: 0.62s; }
-.l-title .ll:nth-child(10) { animation-delay: 0.66s; }
-.l-title .ll:nth-child(11) { animation-delay: 0.70s; }
-.l-title .ll:nth-child(12) { animation-delay: 0.74s; }
-.l-sub {
-  font-size: 9.5px; font-weight: 400; letter-spacing: 0.11em;
-  color: var(--text-muted); text-transform: uppercase;
-  animation: lFadeUp 0.4s ease 0.80s both;
+.l-heading {
+  color: #f5f7fb; font-size: 19px; line-height: 1.2;
+  font-weight: 680; letter-spacing: -.02em;
 }
-
-/* ─ Dot loader ─ */
-.l-dots {
-  display: flex; gap: 9px; align-items: center;
-  animation: lFadeUp 0.4s ease 0.72s both;
-}
-.l-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: rgba(255,255,255,0.18);
-  animation: lDotBounce 1.55s ease-in-out infinite;
-}
-.l-dot:nth-child(1) { background: #ff6b35; animation-delay: 0s; }
-.l-dot:nth-child(2) { animation-delay: 0.20s; }
-.l-dot:nth-child(3) { animation-delay: 0.40s; }
-
-/* ─ Progress bar ─ */
-.l-track {
-  width: 100%; height: 3px; border-radius: 99px; position: relative;
-  background: rgba(255,255,255,0.07); overflow: hidden;
-  animation: lFadeUp 0.4s ease 0.76s both;
-}
-
-.l-fill {
-  position: absolute; top: 0; height: 100%; border-radius: 99px;
-  width: 50%;
-  background: linear-gradient(90deg, transparent, #ff6b35 30%, #f59e0b 70%, transparent);
-  animation: lBarMove 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-/* ─ Text ─ */
 .l-msg {
-  font-size: 12px; font-weight: 500; letter-spacing: 0.05em;
-  color: var(--text-secondary); text-align: center;
-  animation: lFadeUp 0.4s ease 0.92s both;
+  min-height: 18px; margin-top: 6px;
+  color: #b3bfd0; font-size: 11px; line-height: 1.5;
 }
-.l-hint {
-  font-size: 10.5px; color: var(--text-muted); text-align: center;
-  max-width: 230px; line-height: 1.55;
-  animation: lFadeUp 0.4s ease 1.55s both;
+.l-percent {
+  flex: 0 0 auto; color: #ff945f;
+  font-size: 30px; line-height: 1; font-weight: 730;
+  letter-spacing: -.035em; font-variant-numeric: tabular-nums;
 }
-
-/* ─ Refresh: top bar ─ */
-.l-topbar {
-  position: absolute; top: 0; left: 0; right: 0; height: 3px;
-  overflow: hidden; pointer-events: none;
+.l-track {
+  position: relative; height: 7px; margin-top: 19px;
+  overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.09);
 }
+.l-fill {
+  position: relative; height: 100%; min-width: 4px; border-radius: inherit;
+  background: linear-gradient(90deg, #f46a35, #ff9d5e);
+  transition: width .42s cubic-bezier(.22,1,.36,1);
+}
+.l-fill::after {
+  content: ""; position: absolute; right: 0; top: 0;
+  width: min(44px, 100%); height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.34));
+  animation: lProgressGleam 1.8s cubic-bezier(.45,0,.55,1) infinite;
+}
+.l-test-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 36px; margin-top: 17px; padding: 0 8px 0 0;
+  border: 0; border-radius: 7px; background: transparent;
+  color: #bac5d5; font: inherit; font-size: 10.5px;
+  font-weight: 590; cursor: pointer;
+  transition: color .18s cubic-bezier(.22,1,.36,1);
+}
+.l-test-btn:hover { color: #fff; }
+.l-test-btn:active { transform: translateY(1px); }
+.l-test-btn:focus-visible { outline: 2px solid #ff945f; outline-offset: 3px; }
+.l-test-btn kbd {
+  display: grid; place-items: center; width: 22px; height: 22px;
+  border: 1px solid rgba(255,255,255,.22); border-radius: 5px;
+  background: rgba(255,255,255,.06); color: #ffab80;
+  font: 700 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+/* Background refresh keeps its compact blocking indicator. */
+.l-topbar { position: absolute; top: 0; left: 0; right: 0; height: 3px; overflow: hidden; pointer-events: none; }
 .l-topbar-fill {
-  height: 100%; width: 100%;
-  background: linear-gradient(90deg,
-    transparent 0%, #ff6b35 25%, #f59e0b 55%, #ff6b35 80%, transparent 100%);
+  height: 100%;
+  background: linear-gradient(90deg, transparent, #ff6b35 30%, #f59e0b 65%, transparent);
   background-size: 300% 100%;
-  animation: lTopSweep 1.7s ease-in-out infinite;
+  animation: lTopSweep 1.7s cubic-bezier(.45,0,.55,1) infinite;
 }
-
-/* ─ Refresh: pill badge ─ */
 .l-pill {
   display: flex; align-items: center; gap: 9px;
-  padding: 7px 15px 7px 12px; margin: 14px 16px 0 0;
-  background: rgba(255,255,255,0.065);
-  border: 1px solid rgba(255,255,255,0.13);
-  border-radius: 999px;
-  backdrop-filter: blur(24px) saturate(150%);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
-  box-shadow: 0 4px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.10);
-  animation: lPillDrop 0.50s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-  pointer-events: auto; cursor: default;
+  margin: 0; padding: 11px 18px 11px 15px;
+  border: 1px solid rgba(255,255,255,.13); border-radius: 999px;
+  background: rgba(25,29,43,.94); box-shadow: 0 4px 24px rgba(0,0,0,.28);
 }
-.loading-refresh .l-pill {
-  margin: 0;
-  padding: 11px 18px 11px 15px;
-}
-
 .l-spin {
-  width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0;
-  background: conic-gradient(#ff6b35 0deg, #f59e0b 140deg, rgba(255,255,255,0.08) 200deg);
-  animation: lSpin 0.85s linear infinite;
+  width: 13px; height: 13px; flex-shrink: 0; border-radius: 50%;
+  background: conic-gradient(#ff6b35 0deg, #f59e0b 140deg, rgba(255,255,255,.08) 200deg);
+  animation: lSpin .85s linear infinite;
 }
 .l-pill-text {
-  font-size: 10.5px; font-weight: 600; letter-spacing: 0.09em;
-  text-transform: uppercase; color: var(--text-secondary);
+  color: var(--text-secondary); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase;
 }
-
-/* ─ Keyframes ─ */
-@keyframes lIn    { from { opacity: 0; } to { opacity: 1; } }
-@keyframes lOut   { from { opacity: 1; } to { opacity: 0; transform: scale(1.022); } }
-@keyframes lCardRise {
-  from { opacity: 0; transform: translateY(28px) scale(0.94); }
-  to   { opacity: 1; transform: translateY(0)    scale(1); }
+@keyframes lIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes lOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes lCardEnter {
+  from { opacity: 0; transform: translateY(10px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
-@keyframes lLetterDrop {
-  from { opacity: 0; transform: translateY(-20px); }
-  to   { opacity: 1; transform: translateY(0); }
+@keyframes lEdgeSweep {
+  0%, 100% { transform: translateX(-100%); opacity: 0; }
+  30%, 70% { opacity: .75; }
+  50% { transform: translateX(100%); }
 }
-@keyframes lFadeUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes lOrb1 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  33%     { transform: translate(95px,75px) scale(1.13); }
-  67%     { transform: translate(-55px,95px) scale(0.91); }
-}
-@keyframes lOrb2 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  40%     { transform: translate(-75px,-95px) scale(1.16); }
-  72%     { transform: translate(55px,-50px) scale(0.93); }
-}
-@keyframes lOrb3 {
-  0%,100% { transform: translate(0,0) scale(1); }
-  50%     { transform: translate(-38px,58px) scale(1.11); }
-}
-@keyframes lDotBounce {
-  0%, 55%, 100% { transform: translateY(0) scale(1); opacity: 0.45; }
-  28%            { transform: translateY(-8px) scale(1.35); opacity: 1; }
-}
-@keyframes lBarMove {
-  from { transform: translateX(-120%); }
-  to   { transform: translateX(280%); }
-}
-@keyframes lTopSweep {
-  from { background-position: 100% 0; }
-  to   { background-position: -200% 0; }
-}
+@keyframes lProgressGleam { 0%, 100% { opacity: .32; } 50% { opacity: .9; } }
+@keyframes lTopSweep { from { background-position: 100% 0; } to { background-position: -200% 0; } }
 @keyframes lSpin { to { transform: rotate(360deg); } }
-@keyframes lPillDrop {
-  from { opacity: 0; transform: translateY(-16px) scale(0.88); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+@media (max-width: 480px) {
+  .l-card { padding: 23px 22px 19px; }
+  .l-progress-head { margin-top: 26px; }
+  .l-heading { font-size: 18px; }
+  .l-percent { font-size: 27px; }
 }
-
-/* ─ Responsive ─ */
-@media (max-width: 540px) {
-  .l-card { padding: 36px 28px 32px; min-width: unset; width: calc(100vw - 48px); }
-  .l-title { font-size: 18px; letter-spacing: 0.15em; }
-  .l-orb-1 { width: 320px; height: 320px; }
-  .l-orb-2 { width: 280px; height: 280px; }
-  .l-orb-3 { display: none; }
-  .l-hint  { display: none; }
+@media (max-height: 360px) {
+  .l-card { padding-top: 18px; padding-bottom: 14px; }
+  .l-progress-head { margin-top: 18px; }
 }
-@media (max-height: 480px) {
-  .l-card { padding: 24px 36px; gap: 18px; }
-  .l-hint { display: none; }
-  .l-orb-1, .l-orb-2, .l-orb-3 { display: none; }
-}
-
-/* Reduce motion */
 @media (prefers-reduced-motion: reduce) {
-  .l-orb, .l-fill, .l-topbar-fill, .l-spin,
   .loading-overlay.loading-first,
-  .loading-overlay.loading-exit { animation: none !important; }
-  .l-dot  { animation: lDotFade 2s ease-in-out infinite !important; }
-  .l-title .ll, .l-sub, .l-dots, .l-track, .l-msg, .l-hint, .l-pill
-  { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .loading-overlay.loading-exit,
+  .l-card, .l-card::before, .l-fill::after,
+  .l-topbar-fill, .l-spin { animation: none !important; }
+  .l-fill, .l-test-btn { transition: none !important; }
 }
-@keyframes lDotFade { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 /* Kept for .priority-card */
 @keyframes fadeUp {
@@ -2010,6 +1907,7 @@ body.flow-switching .refresh-info {
 /* ─── Priority Card — Liquid Glass ───────────────────────── */
 
 /* Per-card glow + tint colors */
+.pcard-b2b           { --glow: rgba(239,68,68,0.78);   --glow-far: rgba(220,38,38,0.34);   --glow-ultra: rgba(239,68,68,0.15);   --glow-tint: rgba(239,68,68,0.32);  }
 .pcard-rest-soon     { --glow: rgba(251,191,36,0.65);  --glow-far: rgba(251,191,36,0.28);  --glow-ultra: rgba(251,191,36,0.10);  --glow-tint: rgba(251,191,36,0.26); }
 .pcard-at-hu         { --glow: rgba(255,107,53,0.55);  --glow-far: rgba(255,107,53,0.22);  --glow-ultra: rgba(255,107,53,0.08);  --glow-tint: rgba(255,107,53,0.22); }
 .pcard-temu          { --glow: rgba(244,63,94,0.55);   --glow-far: rgba(244,63,94,0.22);   --glow-ultra: rgba(244,63,94,0.08);   --glow-tint: rgba(244,63,94,0.22);  }
@@ -2019,6 +1917,44 @@ body.flow-switching .refresh-info {
 .pcard-standard      { --glow: rgba(139,148,158,0.32); --glow-far: rgba(139,148,158,0.12); --glow-ultra: rgba(139,148,158,0.05); --glow-tint: rgba(139,148,158,0.10); }
 .pcard-betarolt        { --glow: rgba(120,136,160,0.35);  --glow-far: rgba(120,136,160,0.14); --glow-ultra: rgba(120,136,160,0.05); --glow-tint: rgba(120,136,160,0.12); }
 .pcard-betarolt-stored { --glow: rgba(230,126,34,0.50);   --glow-far: rgba(230,126,34,0.20);  --glow-ultra: rgba(230,126,34,0.07);  --glow-tint: rgba(230,126,34,0.18);  }
+
+.priority-test-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.priority-test-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(251,191,36,0.56);
+  border-radius: 12px;
+  color: #fef3c7;
+  background: rgba(120,53,15,0.38);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 8px 22px rgba(0,0,0,0.18);
+}
+
+.priority-test-banner strong {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+.priority-test-banner span {
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .priority-test-banner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+}
 
 .priority-card {
   position: relative;
@@ -11993,24 +11929,21 @@ body.flow-outbound-mode .truck-sidebar {
 
 .truck-sidebar-list {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .truck-sidebar-card {
   cursor: pointer;
   user-select: none;
   display: grid;
-  gap: 6px;
-  padding: 9px 9px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  background:
-    radial-gradient(110% 145% at 0% 0%, var(--truck-color-soft, rgba(255, 255, 255, 0.08)), transparent 62%),
-    linear-gradient(145deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
-    rgba(5, 8, 18, 0.78);
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--truck-color-soft, rgba(255, 255, 255, 0.12));
+  background: rgba(8, 13, 27, 0.88);
   box-shadow:
-    0 8px 22px rgba(0, 0, 0, 0.26),
-    inset 0 1px 0 rgba(255, 255, 255, 0.09);
+    0 7px 18px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.055);
   transition:
     transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
     border-color 0.18s ease,
@@ -12024,29 +11957,26 @@ body.flow-outbound-mode .truck-sidebar {
 .truck-sidebar-card.truck-sidebar-active {
   transform: translateY(-1px);
   border-color: var(--truck-color, rgba(255, 255, 255, 0.28));
-  background:
-    radial-gradient(120% 150% at 0% 0%, var(--truck-color-glow, rgba(255, 255, 255, 0.14)), transparent 64%),
-    linear-gradient(145deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.030)),
-    rgba(5, 8, 18, 0.88);
+  background: rgba(11, 18, 35, 0.96);
   box-shadow:
-    0 0 0 1px var(--truck-color, rgba(255, 255, 255, 0.18)),
-    0 12px 30px rgba(0, 0, 0, 0.34),
-    0 0 28px var(--truck-color-glow, rgba(139, 148, 158, 0.16)),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    0 0 0 1px var(--truck-color-soft, rgba(255, 255, 255, 0.10)),
+    0 11px 26px rgba(0, 0, 0, 0.32),
+    0 0 20px var(--truck-color-soft, rgba(139, 148, 158, 0.12)),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .truck-sidebar-head {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
 }
 
 .truck-sidebar-dot {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  box-shadow: 0 0 12px currentColor;
+  box-shadow: 0 0 9px currentColor;
 }
 
 .truck-sidebar-plate {
@@ -12054,22 +11984,21 @@ body.flow-outbound-mode .truck-sidebar {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  font-weight: 900;
+  font-size: 12.5px;
+  font-weight: 850;
+  letter-spacing: 0.01em;
   color: #f8fbff;
 }
 
 .truck-store-btn {
   min-height: 24px;
-  padding: 4px 7px;
-  border-radius: 7px;
-  border: 1px solid rgba(16, 185, 129, 0.36);
-  background:
-    radial-gradient(100% 120% at 0% 0%, rgba(52, 211, 153, 0.18), transparent 60%),
-    rgba(16, 185, 129, 0.10);
-  color: rgba(190, 255, 228, 0.95);
-  font-size: 10px;
-  font-weight: 900;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 9.5px;
+  font-weight: 800;
   line-height: 1;
   transition:
     transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
@@ -12080,31 +12009,50 @@ body.flow-outbound-mode .truck-sidebar {
 
 .truck-store-btn:hover {
   transform: translateY(-1px);
-  filter: brightness(1.12);
+  color: rgba(190, 255, 228, 0.96);
   border-color: rgba(52, 211, 153, 0.66);
-  background:
-    radial-gradient(100% 120% at 0% 0%, rgba(52, 211, 153, 0.24), transparent 60%),
-    rgba(16, 185, 129, 0.15);
+  background: rgba(16, 185, 129, 0.11);
+}
+
+.truck-store-btn:focus-visible,
+.truck-sidebar-card:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.92);
+  outline-offset: 2px;
 }
 
 .truck-sidebar-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   color: rgba(203, 213, 225, 0.66);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
+}
+
+.truck-sidebar-facts {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 9px;
 }
 
 .truck-uld-count,
 .truck-awb-count {
   display: inline-flex;
   align-items: center;
-  min-height: 18px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
-  border: 1px solid rgba(255, 255, 255, 0.075);
+  gap: 3px;
+  min-height: 17px;
+  color: rgba(203, 213, 225, 0.70);
+  white-space: nowrap;
+}
+
+.truck-awb-count strong,
+.truck-ship-count strong {
+  color: rgba(248, 251, 255, 0.94);
+  font-size: 11px;
+  font-weight: 850;
 }
 
 .truck-uld-types {
@@ -12139,11 +12087,11 @@ body.flow-outbound-mode .truck-sidebar {
 .truck-comp-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 18px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 900;
+  min-height: 17px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 850;
   line-height: 1;
   border: 1px solid rgba(255, 255, 255, 0.10);
 }
@@ -12153,21 +12101,22 @@ body.flow-outbound-mode .truck-sidebar {
   border-color: rgba(74, 158, 255, 0.30);
 }
 .truck-comp-chip.is-plt {
-  color: rgba(226, 232, 240, 0.86);
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(203, 213, 225, 0.78);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.09);
 }
 
 /* Releasable-item pill + en-route ("Úton") badge */
 .truck-ship-count {
   display: inline-flex;
   align-items: center;
-  min-height: 18px;
-  padding: 2px 7px;
-  border-radius: 999px;
+  gap: 3px;
+  min-height: 17px;
   color: rgba(190, 255, 228, 0.95);
-  background: rgba(16, 185, 129, 0.14);
-  border: 1px solid rgba(16, 185, 129, 0.30);
+  white-space: nowrap;
+}
+.truck-ship-count strong {
+  color: rgba(110, 231, 183, 0.98);
 }
 .truck-route-badge {
   justify-self: end;
@@ -12204,21 +12153,27 @@ body.flow-outbound-mode .truck-sidebar {
 /* Per-truck drill-down list — revealed on hover / focus / active. */
 .truck-sidebar-drill {
   display: grid;
-  gap: 3px;
-  max-height: 0;
+  grid-template-rows: 0fr;
   opacity: 0;
-  overflow: hidden;
   margin-top: 0;
   transition:
-    max-height 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    grid-template-rows 0.24s cubic-bezier(0.22, 1, 0.36, 1),
     opacity 0.24s ease,
     margin-top 0.24s ease;
 }
+
+.truck-sidebar-drill-inner {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  gap: 3px;
+}
+
 .truck-sidebar-card:hover .truck-sidebar-drill,
 .truck-sidebar-card.truck-sidebar-hover .truck-sidebar-drill,
 .truck-sidebar-card.truck-sidebar-active .truck-sidebar-drill,
 .truck-sidebar-card:focus-visible .truck-sidebar-drill {
-  max-height: 340px;
+  grid-template-rows: 1fr;
   opacity: 1;
   margin-top: 3px;
 }
@@ -12400,26 +12355,15 @@ body.flow-outbound-mode .truck-sidebar {
 
 .truck-sidebar {
   margin-top: 18px;
-  padding: 0 10px 14px 12px;
-  border-radius: 18px;
-  border: 1px solid rgba(148, 163, 184, 0.20);
-  background:
-    radial-gradient(120% 88% at 4% 0%, rgba(74,158,255,0.22), transparent 58%),
-    radial-gradient(100% 76% at 100% 100%, rgba(16,185,129,0.14), transparent 62%),
-    linear-gradient(180deg, rgba(14, 22, 45, 0.92), rgba(6, 10, 24, 0.80) 54%, rgba(3, 7, 18, 0.88)),
-    rgba(4, 8, 18, 0.80);
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
-  /* Refractive glass bevel: bright rim along the top/left edges, soft shadow on
-     the bottom/right + a wide colour-matched ambient halo. CSS-only stand-in for
-     the distortion ask (real SVG displacement renders black on this machine). */
+  padding: 0 11px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(5, 10, 23, 0.93);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
   box-shadow:
-    0 18px 44px rgba(0,0,0,0.34),
-    0 0 40px rgba(74,158,255,0.10),
-    inset 1.5px 1.5px 0 rgba(255,255,255,0.16),
-    inset 0 2px 1px rgba(255,255,255,0.10),
-    inset -1.5px -1.5px 2px rgba(0,0,0,0.30),
-    inset 0 -2px 6px rgba(0,0,0,0.22);
+    0 16px 36px rgba(0,0,0,0.30),
+    inset 0 1px 0 rgba(255,255,255,0.07);
 }
 
 .truck-sidebar::before {
@@ -12427,39 +12371,45 @@ body.flow-outbound-mode .truck-sidebar {
   position: sticky;
   top: 0;
   display: block;
-  height: 9px;
-  margin: 0 -10px 0 -12px;
-  border-radius: 18px 18px 0 0;
-  background:
-    linear-gradient(90deg, rgba(74,158,255,0.55), rgba(16,185,129,0.24), rgba(255,255,255,0.08)),
-    #0b1124;
+  height: 1px;
+  margin: 0 -11px;
+  border-radius: 14px 14px 0 0;
+  background: rgba(255, 255, 255, 0.08);
   z-index: 3;
 }
 
 .truck-sidebar-title-row {
   position: sticky;
-  top: 9px;
+  top: 1px;
   z-index: 4;
-  margin: 0 -8px 9px -12px;
-  padding: 9px 10px 8px 12px;
-  /* Opaque header band so cards scrolling up vanish cleanly beneath it instead of
-     bleeding through / over the "KAMIONOK" strip (no translucency, no backdrop blur). */
-  background:
-    radial-gradient(120% 130% at 0% 0%, rgba(74,158,255,0.22), transparent 58%),
-    linear-gradient(90deg, #0d162e, #070d1e);
-  border-bottom: 1px solid rgba(255,255,255,0.105);
+  margin: 0 -11px 10px;
+  padding: 12px 12px 10px;
+  background: #080f21;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
 }
 
 .truck-pickup-time {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: rgba(186, 230, 253, 0.94);
-  background: rgba(74, 158, 255, 0.105);
-  border: 1px solid rgba(74, 158, 255, 0.18);
+  display: grid;
+  justify-items: end;
+  gap: 1px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(148, 163, 184, 0.18);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.truck-time-label {
+  color: rgba(148, 163, 184, 0.72);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.truck-time-value {
+  color: rgba(226, 232, 240, 0.92);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.15;
 }
 
 
@@ -15198,22 +15148,21 @@ body.view-kpi-switching .inbound-main-shell {
 
 
 .truck-sidebar-card {
-  border-left: 3px solid var(--truck-color, rgba(255,255,255,0.24));
+  border: 1px solid var(--truck-color-soft, rgba(255,255,255,0.12));
   box-shadow:
-    -2px 0 0 var(--truck-color-soft, rgba(255,255,255,0.08)),
     0 8px 22px rgba(0, 0, 0, 0.26),
     inset 0 1px 0 rgba(255, 255, 255, 0.09);
 }
 
 .truck-sidebar-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   background: var(--truck-color, currentColor) !important;
   color: var(--truck-color, currentColor);
-  border: 1px solid rgba(255,255,255,0.58);
+  border: 1px solid rgba(255,255,255,0.46);
   box-shadow:
-    0 0 0 3px var(--truck-color-soft, rgba(255,255,255,0.10)),
-    0 0 16px var(--truck-color-glow, rgba(255,255,255,0.18));
+    0 0 0 2px var(--truck-color-soft, rgba(255,255,255,0.08)),
+    0 0 10px var(--truck-color-glow, rgba(255,255,255,0.14));
 }
 
 

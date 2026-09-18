@@ -62,6 +62,10 @@ _state = {
     "source_signature": None,
     "issued_awbs": set(),
     "refreshing": False,
+    "load_progress": 0,
+    "load_stage": "Indítás",
+    "load_detail": "Adatforrások előkészítése",
+    "load_started_at": None,
     "uld_data": [],
     "uld_times_full": {},
     "uld_returned": [],
@@ -87,6 +91,10 @@ def mark_refresh_started():
     with _lock:
         if _state.get("status") != "loading":
             _state["refreshing"] = True
+            _state["load_progress"] = 1
+            _state["load_stage"] = "Frissítés indítása"
+            _state["load_detail"] = "Adatforrások előkészítése"
+            _state["load_started_at"] = datetime.now()
             _state["data_version"] += 1
 
 
@@ -227,6 +235,10 @@ def _load_dashboard_cache() -> bool:
         _state["data_version"] += 1
         _state["source_signature"] = payload.get("source_signature")
         _state["refreshing"] = (not payload.get("_source_signature_match", False)) or payload.get("_missing_uld_data", False)
+        _state["load_progress"] = 100
+        _state["load_stage"] = "Gyorsítótár betöltve"
+        _state["load_detail"] = "A háttérfrissítés hamarosan elindul"
+        _state["load_started_at"] = None
 
     log.info("Dashboard cache loaded from %s (%d rows)", path, len(df))
     return True
@@ -542,10 +554,18 @@ def _file_watcher():
 _read_result_q: "queue.Queue" = queue.Queue()
 
 
+def _set_load_progress(percent: int, stage: str, detail: str = "") -> None:
+    """Publish lightweight, thread-safe source-read progress for the overlay."""
+    with _lock:
+        _state["load_progress"] = max(0, min(100, int(percent)))
+        _state["load_stage"] = str(stage or "Adatok betöltése")
+        _state["load_detail"] = str(detail or "")
+
+
 def _reader_body():
     started_at = datetime.now()
     try:
-        result = load_all_flow_data()
+        result = load_all_flow_data(progress_callback=_set_load_progress)
         _read_result_q.put(("ok", {"result": result, "started_at": started_at}))
     except Exception as exc:
         log.error("Cache: source read raised: %s", exc, exc_info=True)
@@ -577,6 +597,8 @@ def _mark_read_stalled(reason: str, first: bool):
         _state["read_stalled"] = True
         _state["read_stall_reason"] = reason
         _state["refreshing"] = False
+        _state["load_stage"] = "A beolvasás elakadt"
+        _state["load_detail"] = reason
         if have_good:
             _state["status"] = "ready"   # serving last-good data, just stale
         elif first:
@@ -653,6 +675,10 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
             _state["uld_last_refresh"] = loaded_at
             _state["uld_source_signature"] = _uld_source_signature(_state["source_signature"])
         _state["refreshing"]   = False
+        _state["load_progress"] = 100
+        _state["load_stage"] = "Betöltés kész"
+        _state["load_detail"] = f"{len(df)} aktív tétel"
+        _state["load_started_at"] = None
         row_count = len(_state["df"])
     log.info("Cache: refresh done, %d active items", row_count)
     return True
@@ -665,6 +691,11 @@ def _worker():
         # Dispatch a fresh read only when the previous one is no longer running,
         # so a stuck read never accumulates duplicate reader threads.
         if reader is None or not reader.is_alive():
+            with _lock:
+                _state["load_progress"] = 1
+                _state["load_stage"] = "Betöltés indítása"
+                _state["load_detail"] = "Adatforrások ellenőrzése"
+                _state["load_started_at"] = datetime.now()
             if first:
                 print("  [*] E_COMM adatok betöltése (~30 mp)...", flush=True)
             else:

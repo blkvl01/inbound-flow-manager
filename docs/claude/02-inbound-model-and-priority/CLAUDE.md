@@ -117,6 +117,19 @@ glabs_ready_items         kompatibilitási alias, jelenleg ugyanazt kapja
 
 Fájl: `priority_engine.py`
 
+B2B abszolút prioritás:
+
+- Ha a tétel saját E_COMM `Ügyfél` / inbound `lmp` mezőjében a `B2B`
+  önálló azonosítóként szerepel, a tétel minden más prioritási kapu elé kerül.
+- Ez az AT/HU pihenő-hamarosan, a 4+ órás aged és az operatív bucket szabályt is
+  megelőzi; a B2B blokkon belül az itt lévő munka megelőzi az úton lévőt.
+- A B2B prioritást kizárólag a tétel saját `lmp` mezője adja. Ugyanazon GLABS
+  dropdown másik B2B sora nem emelheti előre a nem B2B tételt.
+- UI: `B2B - AZONNALI PRIORITÁS` címke és piros `b2b` színkulcs.
+- A normál inbound prioritási felületen a `T` billentyű memóriában élő tesztnézetet
+  kapcsol. A tesztadatok ugyanazon `apply_priorities()` és `_make_card()` útvonalon
+  futnak, mint az üzemi tételek; a tesztmód sem Excelt, sem shared state-et nem ír.
+
 Csoportok:
 
 ```text
@@ -169,7 +182,7 @@ Rendezési kulcs:
 
 ```python
 (
-    hard_gate,            # 0 AT/HU rest-soon, 1 aged (4+ óra), 2 normál, 3 úton
+    hard_gate,            # -1 B2B, 0 AT/HU rest-soon, 1 aged (4+ óra), 2 normál, 3 úton
     arrival,              # csak úton tételnél: korábbi várható érkezés előrébb
     am if aged else 0,    # aged tieren belül: legrégebben felvéve elöl
     priority_group,

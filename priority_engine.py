@@ -41,6 +41,7 @@ def _as_int(v, default: int = 0) -> int:
 
 
 _AT_HU = re.compile(r"(?:^| )(?:AT|HU)(?: |$)")
+_B2B = re.compile(r"(?:^| )B2B(?: |$)")
 _TEMU = re.compile(r"(?:^| )TEMU(?: |$)")
 _TEMU_MD = re.compile(r"(?:^| )TEMU\s+MD(?: |$)")
 _MEEST_MD = re.compile(r"(?:^| )MEEST\s+MD(?: |$)")
@@ -108,6 +109,11 @@ def _is_driver_active(row) -> bool:
 def _is_at_hu_priority(row) -> bool:
     """AT/HU display flag; actual boost is applied inside every operational bucket."""
     return bool(row.get("is_at_hu", False))
+
+
+def _is_b2b_priority(row) -> bool:
+    """True when the item's own LMP/customer field contains the B2B lane token."""
+    return bool(_B2B.search(_norm_lane(row.get("lmp", ""))))
 
 
 def _is_temu_like(row) -> bool:
@@ -262,6 +268,7 @@ def _score(row) -> tuple:
     Sort key (ascending = highest priority first).
     Levels:
       0. Hard availability gate:
+           gate -1 = B2B LMP/ügyfél → minden más tétel elé
            gate 0 = AT/HU rest-soon (sofőr hamarosan indul)
            gate 1 = AGED (4+ órája felvéve, már itt van) → minden normál munka elé
            gate 2 = normál munka
@@ -285,6 +292,27 @@ def _score(row) -> tuple:
     operational_bucket = _operational_bucket(row)
     status_sort = _load_status_sort(row)
     aged = _is_aged(row)
+    is_b2b = _is_b2b_priority(row)
+
+    if is_b2b:
+        # B2B is an absolute business-priority gate. Keep sensible ordering inside
+        # the B2B block: arrived work first, then operational readiness and age.
+        is_en_route = priority_group == GRP_EN_ROUTE
+        return (
+            -1,
+            1 if is_en_route else 0,
+            arrival if is_en_route else operational_bucket,
+            -count,
+            -round(ratio, 4),
+            am,
+            priority_group,
+            operational_bucket,
+            -count,
+            lmp_tier,
+            -round(ratio, 4),
+            status_sort,
+            am,
+        )
 
     if priority_group == GRP_ATHU_REST_SOON:
         hard_gate = 0
@@ -347,6 +375,10 @@ def apply_priorities(df: pd.DataFrame) -> pd.DataFrame:
     _lane = df["priority_lane_text"].str.upper().str.replace(r"[^A-Z0-9]+", " ", regex=True)
     _temu_md_pat = r"(?:^| )TEMU MD(?= |$)"
     df["is_at_hu"]   = _lane.str.contains(r"(?:^| )(?:AT|HU)(?= |$)", regex=True, na=False)
+    # B2B priority belongs to the item's own E_COMM LMP/customer value. Do not
+    # inherit it from another row in the same GLABS loading dropdown.
+    _own_lmp = df["lmp"].fillna("").astype(str).str.upper().str.replace(r"[^A-Z0-9]+", " ", regex=True)
+    df["is_b2b_priority"] = _own_lmp.str.contains(r"(?:^| )B2B(?= |$)", regex=True, na=False)
     df["is_temu"]    = (
         _lane.str.contains(r"(?:^| )TEMU(?= |$)", regex=True, na=False)
         & ~_lane.str.contains(_temu_md_pat, regex=True, na=False)
@@ -377,6 +409,8 @@ def apply_priorities(df: pd.DataFrame) -> pd.DataFrame:
     df["priority_group"] = df.apply(_group, axis=1)
     df["priority_label"] = df["priority_group"].map(lambda g: _GROUP_META[g][0])
     df["priority_color"] = df["priority_group"].map(lambda g: _GROUP_META[g][1])
+    df.loc[df["is_b2b_priority"], "priority_label"] = "B2B - AZONNALI PRIORITÁS"
+    df.loc[df["is_b2b_priority"], "priority_color"] = "b2b"
 
     df = df.sort_values("priority_score").reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)

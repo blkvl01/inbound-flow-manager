@@ -98,6 +98,20 @@ Driver státusz:
 - `Bejelentkezve`, `Sofőr nincs bejelentkezve`, `Nem szerepel rakodásban`, `Pihenőn` mini-kártya jellegű blokk.
 - Nem sima szöveg: bal oldali jelző, visszafogott háttér, hover, light mode.
 
+Induló betöltőnézet:
+
+- A `data_cache` valós `load_progress`, `load_stage` állapotot ad; az
+  `app.py::_loading_first_children` ezekből kompakt, százalékos betöltőkártyát
+  épít a meglévő UI fölött. Nincs becsült hátralévő idő vagy részletes adatútvonal.
+  Tilos visszatenni a korábbi, végtelenül mozgó ál-progressbart.
+- A `loading-poll` 750 ms-onként csak ezt a könnyű állapotot olvassa; nem indít
+  új adatbetöltést.
+- Hideg indulás és nulla aktív tétel közben is működik a globális `T` shortcut,
+  valamint a `loading-test-btn`. A tesztnézet elrejti az overlayt és kizárólag
+  szintetikus, nem írható prioritási sorokat jelenít meg.
+- A betöltőkártya reszponzív, billentyűzettel használható, ARIA progressbart és
+  `prefers-reduced-motion` támogatást tartalmaz; nincs folyamatos pointerkövetés.
+
 ---
 
 ## Stat gombok
@@ -219,27 +233,25 @@ Build:
 
 ```powershell
 cd "C:\Inbound Flow Manager"
-build.bat
+build.bat 1.2.0
 ```
 
 Kimenet:
 
 ```text
-dist/FlowManager/FlowManager.exe
+release/FlowManager.exe
 ```
 
-Deploy közös mappába:
+GitHub Release csomag:
 
-- Ez `--onedir` PyInstaller build, nem egyetlen önálló exe.
-- A buildben az assets mappa helye: `dist/FlowManager/_internal/assets/`.
-- Ha Python-kód változott (`app.py`, `data_reader.py`, `priority_engine.py`, stb.),
-  a teljes `dist/FlowManager/` mappa tartalmát kell kicserélni a közös mappában
-  (`FlowManager.exe` + `_internal/` + minden mellékelt adat). Csak az exe cseréje
-  nem elég, mert a dependency/runtime fájlok a mappa részei.
-- Ha kizárólag `assets/` változott és biztosan ugyanaz a build marad, elég lehet
-  a közös mappában a `_internal/assets/` cseréje. Biztonságos release-hez viszont
-  mindig a teljes `dist/FlowManager/` tartalmat cseréld.
-- A közös `_shared_state/` állapotfájlokat nem a build outputból kell felülírni.
+- Ez `--onefile` PyInstaller build; az üzemeltetőnek csak a `FlowManager.exe`-t
+  kell letöltenie és elindítania.
+- A `release/` mappában a `FlowManager.exe`, `manifest.json` és a kiadási
+  dokumentáció marad. A manifest méretet és SHA-256 értéket tartalmaz.
+- A kiadás assetjei: `FlowManager.exe` és `manifest.json`. A dokumentáció
+  feltölthető mellé, de a futó updaternek nem szükséges.
+- A közös `_shared_state/` és a OneDrive-ban tárolt Excel-fájlok nem részei a
+  kiadásnak, nem kerülnek felülírásra.
 
 ---
 

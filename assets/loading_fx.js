@@ -1,44 +1,6 @@
-/* Loading screen: card tilt + shine on mousemove, smooth exit animation. */
+/* Loading screen: smooth exit animation without continuous pointer work. */
 (function () {
   "use strict";
-
-  /* ─── Card tilt + cursor shine (first-load only) ─── */
-  var rafPending = false;
-  var lastEv = null;
-
-  function applyTilt() {
-    rafPending = false;
-    var overlay = document.getElementById("overlay");
-    if (!overlay || !overlay.classList.contains("loading-first")) return;
-    var card = overlay.querySelector(".l-card");
-    if (!card || !lastEv) return;
-
-    var r = card.getBoundingClientRect();
-    var dx = Math.max(-1, Math.min(1, (lastEv.clientX - (r.left + r.width  / 2)) / (r.width  / 2)));
-    var dy = Math.max(-1, Math.min(1, (lastEv.clientY - (r.top  + r.height / 2)) / (r.height / 2)));
-
-    card.style.transform =
-      "perspective(700px) rotateY(" + (dx * 5).toFixed(2) +
-      "deg) rotateX(" + (-dy * 3.5).toFixed(2) + "deg)";
-
-    card.style.setProperty("--sx", ((lastEv.clientX - r.left) / r.width  * 100).toFixed(1) + "%");
-    card.style.setProperty("--sy", ((lastEv.clientY - r.top)  / r.height * 100).toFixed(1) + "%");
-  }
-
-  document.addEventListener("mousemove", function (e) {
-    lastEv = e;
-    if (!rafPending) { rafPending = true; requestAnimationFrame(applyTilt); }
-  }, { passive: true });
-
-  document.addEventListener("mouseleave", function () {
-    var overlay = document.getElementById("overlay");
-    if (!overlay) return;
-    var card = overlay.querySelector(".l-card");
-    if (!card) return;
-    card.style.transform = "";
-    card.style.setProperty("--sx", "50%");
-    card.style.setProperty("--sy", "50%");
-  });
 
   /* ─── Smooth exit via MutationObserver ─── */
   function watchOverlay() {

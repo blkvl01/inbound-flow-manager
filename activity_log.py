@@ -1,7 +1,7 @@
 """
 Shared activity log for the developer menu.
 
-Daily JSONL files under <shared>/activity_logs/activity_YYYY-MM-DD.jsonl;
+Daily JSONL files directly under <shared>/activity_YYYY-MM-DD.jsonl;
 one JSON object per line:
   {"ts": "<ISO>", "user": "...", "host": "...", "action": "...", "detail": {...}}
 
@@ -35,12 +35,9 @@ _session_started_at = time.time()
 
 
 def _logs_dir() -> Path:
-    d = _shared_base_dir() / "activity_logs"
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return d
+    # Use the existing operational workspace directly. The app must not create
+    # a project-owned activity-log subdirectory in OneDrive.
+    return _shared_base_dir()
 
 
 def _day_file(day: str | None = None) -> Path:

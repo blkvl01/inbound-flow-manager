@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('assets', 'assets')]
 binaries = []
-hiddenimports = ['pyxlsb', 'pyxlsb.biff_record', 'openpyxl', 'openpyxl.styles', 'openpyxl.utils', 'oracledb', 'cryptography.hazmat.primitives.kdf', 'pandas', 'pandas.io.formats.style', 'flask', 'flask_compress', 'multiprocessing']
+hiddenimports = ['pyxlsb', 'openpyxl', 'openpyxl.styles', 'openpyxl.utils', 'oracledb', 'cryptography.hazmat.primitives.kdf', 'pandas', 'pandas.io.formats.style', 'flask', 'flask_compress', 'multiprocessing']
 datas += copy_metadata('plotly')
 datas += copy_metadata('dash')
 datas += copy_metadata('dash-bootstrap-components')
@@ -41,8 +41,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,
+    a.datas,
     name='FlowManager',
     debug=False,
     bootloader_ignore_signals=False,
@@ -54,13 +54,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='FlowManager',
 )

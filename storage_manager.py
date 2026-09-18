@@ -11,8 +11,9 @@ stored_awbs.shared.json format:
     }
   }
 
-The file is stored in a shared writable folder next to the deployed app, so
-every user sees the same manual storage state even after restart.
+The file is stored in a shared writable folder. The frozen one-file release
+automatically uses the discovered OneDrive workspace; a launcher may override
+this with FLOW_SHARED_STATE_DIR.
 """
 import json
 import logging
@@ -38,27 +39,34 @@ def _shared_base_dir() -> Path:
     env_override = os.environ.get("FLOW_SHARED_STATE_DIR", "").strip()
     if env_override:
         shared_dir = Path(env_override)
-        try:
-            shared_dir.mkdir(parents=True, exist_ok=True)
+        if shared_dir.is_dir():
             return shared_dir
-        except OSError as exc:
-            log.warning("FLOW_SHARED_STATE_DIR unavailable (%s), falling back to exe folder", exc)
+        log.warning("FLOW_SHARED_STATE_DIR unavailable (%s), falling back to exe folder", shared_dir)
+
+    # The one-file release is intentionally started from a user-writable local
+    # folder, not from the shared OneDrive workspace.  Keep the multi-user
+    # state in the same discovered OneDrive workspace automatically when the
+    # frozen EXE is used and no explicit override was supplied.
+    if getattr(sys, "frozen", False):
+        try:
+            from config import _find_onedrive_folder
+
+            onedrive_folder = Path(_find_onedrive_folder())
+            if onedrive_folder.is_dir():
+                # Use the existing operational workspace directly. Do not
+                # create a project-owned OneDrive subdirectory.
+                return onedrive_folder
+        except (OSError, ImportError) as exc:
+            log.warning("Automatic OneDrive shared-state discovery failed: %s", exc)
 
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent
     else:
         base = Path(__file__).resolve().parent
 
-    shared_dir = base / "_shared_state"
-    try:
-        shared_dir.mkdir(parents=True, exist_ok=True)
-        return shared_dir
-    except OSError as exc:
-        log.warning("Shared state dir unavailable (%s), falling back to LOCALAPPDATA", exc)
-        from config import _config_dir
-        fallback = _config_dir()
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+    # No project-owned fallback directory is created. The executable/source
+    # directory already exists and the shared files are written directly there.
+    return base
 
 
 def _path() -> Path:

@@ -1,9 +1,13 @@
 @echo off
+setlocal EnableExtensions
 title Flow Manager -- Build
+
+set "FLOW_MANAGER_VERSION=%~1"
+if "%FLOW_MANAGER_VERSION%"=="" set "FLOW_MANAGER_VERSION=0.0.0"
 
 echo.
 echo  ============================================
-echo   FLOW MANAGER  --  Build szkript
+echo   FLOW MANAGER  --  Egyfajlos build
 echo   HGL Group Hungary - Ecommerce Flow
 echo  ============================================
 echo.
@@ -60,34 +64,9 @@ if exist build rmdir /s /q build
 echo        PyInstaller futtatasa (ez 2-5 percet vehet igenybe)...
 echo.
 
-python -m PyInstaller ^
-  --onedir ^
-  --name "FlowManager" ^
-  --add-data "assets;assets" ^
-  --collect-all dash ^
-  --collect-all dash_bootstrap_components ^
-  --collect-all plotly ^
-  --copy-metadata plotly ^
-  --copy-metadata dash ^
-  --copy-metadata dash-bootstrap-components ^
-  --copy-metadata flask ^
-  --copy-metadata werkzeug ^
-  --copy-metadata pandas ^
-  --hidden-import pyxlsb ^
-  --hidden-import pyxlsb.biff_record ^
-  --hidden-import openpyxl ^
-  --hidden-import openpyxl.styles ^
-  --hidden-import openpyxl.utils ^
-  --collect-all oracledb ^
-  --collect-all cryptography ^
-  --hidden-import oracledb ^
-  --hidden-import cryptography.hazmat.primitives.kdf ^
-  --hidden-import pandas ^
-  --hidden-import pandas.io.formats.style ^
-  --hidden-import flask ^
-  --hidden-import flask_compress ^
-  --hidden-import multiprocessing ^
-  app.py
+set "FLOW_MANAGER_VERSION=%FLOW_MANAGER_VERSION%"
+:: A FlowManager.spec EXE konfiguracioja PyInstaller --onefile modot hasznal.
+python -m PyInstaller --clean --noconfirm FlowManager.spec
 
 if errorlevel 1 (
     echo.
@@ -102,12 +81,27 @@ echo  ============================================
 echo   BUILD KESZ!
 echo  ============================================
 echo.
-echo  Eredmeny:   dist\FlowManager\
+if not exist release mkdir release
+if exist release\FlowManager.exe del /q release\FlowManager.exe
+if exist release\manifest.json del /q release\manifest.json
+copy /y "dist\FlowManager.exe" "release\FlowManager.exe" >nul
+python scripts\create_release_manifest.py --exe "release\FlowManager.exe" --version "%FLOW_MANAGER_VERSION%" --output "release\manifest.json"
+if errorlevel 1 (
+    echo  [HIBA] Manifest keszitese sikertelen.
+    exit /b 1
+)
+copy /y "docs\RELEASE_NOTES.md" "release\RELEASE_NOTES.md" >nul
+copy /y "docs\UPDATER.md" "release\UPDATER.md" >nul
+python scripts\verify_release.py release
+if errorlevel 1 (
+    echo  [HIBA] A kiadasi mappa ellenorzese sikertelen.
+    exit /b 1
+)
+echo  Eredmeny:   release\
 echo.
 echo  Telepites:
-echo    1. Masold a dist\FlowManager\ mappa TARTALMAT
-echo       a kozos OneDrive mappaba
-echo    2. Mindenki dupla klikk: FlowManager.exe
-echo    3. Elso inditaskor automatikusan generelodik a config.json
+echo    1. A release\FlowManager.exe fajlt tetszoleges irhato helyrol inditsd.
+echo    2. A kozosen hasznalt Excel/OneDrive munkater marad a jelenlegi helyen.
+echo    3. Frissiteskor az EXE melle kerul ideiglenesen a hash-elt letoltes.
 echo.
 pause

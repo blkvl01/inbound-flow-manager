@@ -8,7 +8,7 @@ import unicodedata
 import warnings
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 import openpyxl
 import pandas as pd
@@ -2305,7 +2305,24 @@ def _compute_kpi(raw: pd.DataFrame) -> dict:
         return {}
 
 
-def _read_ecomm_excel_raw() -> tuple[pd.DataFrame, dict]:
+def _notify_progress(
+    callback: Optional[Callable[[int, str, str], None]],
+    percent: int,
+    stage: str,
+    detail: str = "",
+) -> None:
+    """Best-effort progress reporting; UI feedback must never break a read."""
+    if callback is None:
+        return
+    try:
+        callback(max(0, min(100, int(percent))), stage, detail)
+    except Exception:
+        log.debug("Progress callback failed", exc_info=True)
+
+
+def _read_ecomm_excel_raw(
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[pd.DataFrame, dict]:
     """Read the Excel E_COMM source into the shared 21-column raw contract."""
     meta: dict = {"ecomm_source_type": "excel"}
     tmp_path: str | None = None
@@ -2325,18 +2342,50 @@ def _read_ecomm_excel_raw() -> tuple[pd.DataFrame, dict]:
             )
             return pd.DataFrame(), meta
 
+        _notify_progress(progress_callback, 12, "E_COMM előkészítése", "Biztonságos munkamásolat készül")
         tmp_path = _temp_copy(ECOMM_FILE)
+        _notify_progress(progress_callback, 16, "E_COMM szerkezetének ellenőrzése", "Oszlopok és fejléc felismerése")
         column_index, header_row = _resolve_ecomm_column_map(tmp_path)
         ordered_columns = sorted(column_index.items(), key=lambda item: item[1])
-        raw = pd.read_excel(
-            tmp_path,
-            engine="pyxlsb",
-            sheet_name="E-comm",
-            header=header_row - 1,
-            usecols=[idx for _name, idx in ordered_columns],
-            nrows=_ecomm_data_nrows(header_row),
+
+        # pandas.read_excel re-walks and materialises the whole XLSB sheet before
+        # applying usecols. On the live E_COMM workbook that took 2-3 minutes.
+        # Read the 21 required cells directly instead; the source contract and
+        # row-25000 safety cap stay identical, while fully empty selected rows do
+        # not waste DataFrame memory.
+        rows: list[list] = []
+        max_data_rows = _ecomm_data_nrows(header_row)
+        with open_workbook(tmp_path) as wb:
+            with wb.get_sheet("E-comm") as sheet:
+                for row in sheet.rows():
+                    excel_row = (row[0].r + 1) if row else 0
+                    if excel_row <= header_row:
+                        continue
+                    if excel_row > _ECOMM_MAX_EXCEL_ROW:
+                        break
+                    values = [
+                        row[idx].v if idx < len(row) else None
+                        for _name, idx in ordered_columns
+                    ]
+                    if any(not _empty(value) for value in values):
+                        rows.append(values)
+                    scanned = excel_row - header_row
+                    if scanned == 1 or scanned % 500 == 0:
+                        fraction = min(1.0, scanned / max(1, max_data_rows))
+                        percent = 18 + round(fraction * 42)
+                        _notify_progress(
+                            progress_callback,
+                            percent,
+                            "E_COMM adatok beolvasása",
+                            f"{min(excel_row, _ECOMM_MAX_EXCEL_ROW):,} / {_ECOMM_MAX_EXCEL_ROW:,} sor".replace(",", " "),
+                        )
+        raw = pd.DataFrame(rows, columns=[name for name, _idx in ordered_columns])
+        _notify_progress(
+            progress_callback,
+            60,
+            "E_COMM adatok beolvasva",
+            f"{len(raw):,} hasznos sor".replace(",", " "),
         )
-        raw.columns = [name for name, _idx in ordered_columns]
         shifted = {
             name: (_ECOMM_COLUMN_INDEX[name], idx)
             for name, idx in column_index.items()
@@ -2353,7 +2402,9 @@ def _read_ecomm_excel_raw() -> tuple[pd.DataFrame, dict]:
                 pass
 
 
-def _read_ecomm_raw() -> tuple[pd.DataFrame, dict]:
+def _read_ecomm_raw(
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[pd.DataFrame, dict]:
     """Select Excel, Oracle or shadow mode without changing downstream logic."""
     mode = oracle_ecomm.get_source_mode()
     if mode == "oracle":
@@ -2361,7 +2412,7 @@ def _read_ecomm_raw() -> tuple[pd.DataFrame, dict]:
         meta["ecomm_source_mode"] = mode
         return raw, meta
 
-    raw, meta = _read_ecomm_excel_raw()
+    raw, meta = _read_ecomm_excel_raw(progress_callback=progress_callback)
     meta["ecomm_source_mode"] = mode
     if mode == "shadow" and not raw.empty:
         try:
@@ -2386,9 +2437,11 @@ def _read_ecomm_raw() -> tuple[pd.DataFrame, dict]:
     return raw, meta
 
 
-def _read_ecomm() -> tuple[pd.DataFrame, set[str], dict, list[dict]]:
+def _read_ecomm(
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[pd.DataFrame, set[str], dict, list[dict]]:
     """
-    Read E_COMM via pandas (faster than row-by-row pyxlsb for large files).
+    Read E_COMM through the targeted 21-column pyxlsb path.
     Active inbound items: AL (Áttár) filled + N status is Felvéve +
     AP (Vámkez.k.) empty. Also returns all AWBs with AQ (Vámkez.v.) filled
     for the GLABS shippable count,
@@ -2397,7 +2450,7 @@ def _read_ecomm() -> tuple[pd.DataFrame, set[str], dict, list[dict]]:
     ar_awbs:  set[str] = set()
     kpi_data: dict     = {}
     try:
-        raw, source_meta = _read_ecomm_raw()
+        raw, source_meta = _read_ecomm_raw(progress_callback=progress_callback)
         kpi_data.update(source_meta)
         if raw.empty and (source_meta.get("ecomm_source_missing") or source_meta.get("ecomm_source_stale")):
             return pd.DataFrame(), ar_awbs, kpi_data, []
@@ -2408,6 +2461,7 @@ def _read_ecomm() -> tuple[pd.DataFrame, set[str], dict, list[dict]]:
         # KPI computed BEFORE the AL (Áttár) filter — Értesítő rows typically
         # have no transfer date.
         source_meta = dict(kpi_data)
+        _notify_progress(progress_callback, 64, "Műszakmutatók számítása", "KPI-k és státuszok összesítése")
         kpi_data = _compute_kpi(raw)
         kpi_data.update(source_meta)
 
@@ -2708,8 +2762,11 @@ def _read_pallets() -> pd.DataFrame:
     return result
 
 
-def load_data(pallets: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict, dict, list[dict]]:
-    ecomm, ar_awbs, kpi_data, uld_data = _read_ecomm()
+def load_data(
+    pallets: pd.DataFrame | None = None,
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[pd.DataFrame, dict, dict, list[dict]]:
+    ecomm, ar_awbs, kpi_data, uld_data = _read_ecomm(progress_callback=progress_callback)
     if pallets is None:
         pallets = _read_pallets()
 
@@ -3161,7 +3218,9 @@ def _awb_base(awb: str) -> str:
     return awb
 
 
-def load_all_flow_data() -> tuple[pd.DataFrame, dict, dict, list[dict], dict, set, list[dict]]:
+def load_all_flow_data(
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[pd.DataFrame, dict, dict, list[dict], dict, set, list[dict]]:
     """Read BUD-Pallets once, then build both inbound and outbound views.
 
     Returns a 7-tuple; the 6th element is the set of issued AWBs from
@@ -3171,11 +3230,14 @@ def load_all_flow_data() -> tuple[pd.DataFrame, dict, dict, list[dict], dict, se
         # load_data refreshes the Oracle snapshot first, then _read_pallets reads
         # outbound rows from that exact same atomic snapshot. Rebuilding the
         # small DataFrame below is in-memory only and issues no second query.
-        df, errors, kpi, uld_data = load_data()
+        _notify_progress(progress_callback, 4, "Adatforrások előkészítése", "Oracle kapcsolat ellenőrzése")
+        df, errors, kpi, uld_data = load_data(progress_callback=progress_callback)
         pallets = _read_pallets()
     else:
+        _notify_progress(progress_callback, 4, "Adatforrások előkészítése", "BUD-Pallets beolvasása")
         pallets = _read_pallets()
-        df, errors, kpi, uld_data = load_data(pallets=pallets)
+        _notify_progress(progress_callback, 10, "BUD-Pallets beolvasva", f"{len(pallets):,} sor".replace(",", " "))
+        df, errors, kpi, uld_data = load_data(pallets=pallets, progress_callback=progress_callback)
     pallets_read_error = None
     try:
         pallets_read_error = pallets.attrs.get("pallets_read_error")
@@ -3187,6 +3249,7 @@ def load_all_flow_data() -> tuple[pd.DataFrame, dict, dict, list[dict], dict, se
         errors["hard_read_failure"] = True
     # OUTBOUND must ignore E-COM-flagged GLABS loads (rest/pihenő M column = "E-COM").
     # The inbound view above keeps the unfiltered pallets on purpose.
+    _notify_progress(progress_callback, 78, "Aktív tételek összeállítása", "Inbound kapcsolatok és prioritások")
     outbound_pallets = _drop_ecomm_glabs(pallets)
     if isinstance(kpi, dict):
         awb_parcel_map = kpi.get("awb_parcel_map") or {}
@@ -3223,6 +3286,7 @@ def load_all_flow_data() -> tuple[pd.DataFrame, dict, dict, list[dict], dict, se
             kpi.pop("time_bands_inbound_prev", None),
             kpi.pop("time_bands_outbound_prev", None),
         )
+    _notify_progress(progress_callback, 88, "Kiadási sorrend összeállítása", "Kamionok és rakodási állapotok")
     outbound_cards, outbound_errors = load_outbound_data(
         pallets=outbound_pallets,
         ecomm_status_map=kpi.get("awb_status_map", {}),
@@ -3242,4 +3306,5 @@ def load_all_flow_data() -> tuple[pd.DataFrame, dict, dict, list[dict], dict, se
                 if base != awb_str:
                     issued_awbs.add(base)
 
+    _notify_progress(progress_callback, 97, "Felület előkészítése", "Az adatok rendezése befejeződik")
     return df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, uld_data

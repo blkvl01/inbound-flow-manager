@@ -104,6 +104,107 @@ class UldApiHelperTests(unittest.TestCase):
         self.assertEqual(first_badge.style["color"], plate_color_map["TRUCK123"])
         self.assertEqual(first_badge.style, second_badge.style)
 
+    def test_en_route_b2b_card_keeps_red_priority_header(self):
+        card = app._make_card({
+            "priority_color": "b2b",
+            "is_b2b_priority": True,
+            "is_en_route": True,
+            "awb": "12345678901",
+            "cargo_type": "PLT",
+            "rank": 1,
+            "priority_label": "B2B - AZONNALI PRIORITÁS",
+            "glabs_id": "",
+            "glabs_total": 0,
+            "glabs_shippable": 0,
+            "rendszam": "",
+            "lmp": "B2B",
+            "boxes": 1,
+            "weight": 100,
+            "am_time": datetime.now(),
+            "in_bud_pallets": False,
+        })
+
+        header = _find_by_class(card, "card-strip")[0]
+        self.assertEqual(header.style["background"], "#ef4444")
+        self.assertIn("#1", _component_text(header))
+        self.assertIn("B2B - AZONNALI PRIORITÁS", _component_text(header))
+        self.assertIn("pcard-b2b", card.className)
+
+    def test_priority_test_view_uses_production_ranking_with_b2b_first(self):
+        ranked = app._priority_test_df()
+
+        self.assertEqual(len(ranked), 5)
+        self.assertEqual(ranked.iloc[0]["awb"], "TESZT-B2B-001")
+        self.assertEqual(ranked.iloc[0]["rank"], 1)
+        self.assertEqual(ranked.iloc[0]["priority_color"], "b2b")
+        self.assertEqual(ranked.iloc[0]["priority_label"], "B2B - AZONNALI PRIORITÁS")
+        self.assertEqual(list(ranked["awb"]), [
+            "TESZT-B2B-001",
+            "TESZT-AT-HU-001",
+            "TESZT-AGED-001",
+            "TESZT-DRIVER-001",
+            "TESZT-UTON-001",
+        ])
+
+        card = app._make_card(ranked.iloc[0].to_dict(), test_mode=True)
+        self.assertFalse(_find_by_class(card, "badge-stored-empty"))
+        self.assertFalse(_find_by_class(card, "card-notes-block"))
+
+        sidebar = app._truck_sidebar_items(ranked.to_dict("records"), {}, allow_store=False)
+        self.assertNotIn("Betárolva", _component_text(sidebar))
+        self.assertFalse(_find_by_class(sidebar, "truck-store-btn"))
+
+    def test_priority_test_shortcut_is_guarded_from_inputs_and_other_views(self):
+        source = (Path(app.__file__).parent / "assets" / "priority_test_mode.js").read_text(encoding="utf-8")
+
+        self.assertIn('toLowerCase() !== "t"', source)
+        self.assertIn("isEditable(event.target)", source)
+        self.assertIn('classList.contains("view-tv-mode")', source)
+        self.assertIn('classList.contains("view-kpi-mode")', source)
+        self.assertIn('set_props("priority-test-mode"', source)
+        self.assertIn('#loading-test-btn', source)
+        self.assertIn("publish(attempt + 1)", source)
+
+    def test_first_loading_view_exposes_real_progress_and_test_entry(self):
+        state = {
+            "load_progress": 42,
+            "load_stage": "E_COMM adatok beolvasása",
+            "load_detail": "10 500 / 25 000 sor",
+            "load_started_at": datetime.now() - timedelta(seconds=20),
+        }
+
+        children = app._loading_first_children(state)
+        self.assertIn("42%", _component_text(children))
+        self.assertIn("E_COMM adatok beolvasása", _component_text(children))
+        self.assertIn("Tesztnézet megnyitása", _component_text(children))
+        progress = _find_by_class(children, "l-track")[0]
+        self.assertEqual(progress.role, "progressbar")
+        self.assertEqual(progress.to_plotly_json()["props"]["aria-valuenow"], "42")
+        self.assertFalse(_find_by_class(children, "l-step-rail"))
+        self.assertNotIn("hátralévő", _component_text(children).lower())
+
+    def test_test_mode_hides_cold_start_overlay(self):
+        with mock.patch.object(app.data_cache, "get_state", return_value={
+            "status": "loading",
+            "refresh_count": 0,
+            "refreshing": False,
+        }):
+            _cls, style, state = app.update_overlay(0, None, None, True, "first")
+
+        self.assertEqual(style, {"display": "none"})
+        self.assertEqual(state, "test")
+
+    def test_loading_progress_updates_without_replacing_the_panel(self):
+        with mock.patch.object(app.data_cache, "get_state", return_value={
+            "load_progress": 42,
+            "load_stage": "E_COMM adatok beolvasása",
+        }):
+            stage, percent, fill_style, aria_value = app.update_loading_progress(1)
+        self.assertEqual(stage, "E_COMM adatok beolvasása")
+        self.assertEqual(percent, "42%")
+        self.assertEqual(fill_style, {"width": "42%"})
+        self.assertEqual(aria_value, "42")
+
     def test_truck_sidebar_groups_by_plate_and_repeats_uld_prefixes(self):
         rows = [
             {"awb": "111", "cargo_type": "ULD", "rendszam": "TRUCK123", "uld_number": "PMC001",
@@ -130,6 +231,9 @@ class UldApiHelperTests(unittest.TestCase):
         self.assertIn("2 ULD", comp_chips)
         self.assertIn("PLT", comp_chips)
         self.assertIn("1 ULD", comp_chips)
+        self.assertTrue(_find_by_class(sidebar, "truck-sidebar-facts"))
+        self.assertEqual(_component_text(_find_by_class(sidebar, "truck-time-label")[0]), "Felvéve")
+        self.assertEqual(_component_text(_find_by_class(sidebar, "truck-time-value")[0]), "06.15 08:30")
         props = truck_cards[0].to_plotly_json()["props"]
         self.assertEqual(props["data-plate-key"], "TRUCK123")
         self.assertEqual(props["data-truck-turn-key"], "TRUCK123|2026-06-15T08:30")

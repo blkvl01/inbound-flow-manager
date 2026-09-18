@@ -1,6 +1,10 @@
 # Flow Manager – GitHub és Codex Cloud
 
-Privát forrásrepó: https://github.com/blkvl01/inbound-flow-manager
+Nyilvános forrás- és kiadási repó: https://github.com/blkvl01/inbound-flow-manager
+
+Az aktuális hordozható kiadás: `v0.1.1`. A `FlowManager.exe` és a hozzá tartozó
+`manifest.json` publikus GitHub Release assetként érhető el; a HUB és az updater
+token nélkül is ezt a kiadást tudja ellenőrizni.
 
 ## Fejlesztés és ellenőrzés
 

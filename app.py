@@ -1,3 +1,10 @@
+import sys
+
+# The one-file updater helper must be reachable before Dash/Pandas imports.
+if __name__ == "__main__" and "--flow-manager-update-helper" in sys.argv:
+    import updater as _updater_helper
+    raise SystemExit(_updater_helper.run_helper_cli(sys.argv))
+
 import ctypes
 import ctypes.wintypes
 import hashlib
@@ -9,7 +16,6 @@ import os
 import re
 import signal
 import socket
-import sys
 import threading
 import time
 import unicodedata
@@ -17,6 +23,8 @@ import uuid
 import webbrowser
 from collections import Counter
 from datetime import date, datetime, timedelta
+
+_IS_FROZEN = getattr(sys, "frozen", False)
 
 # ---------------------------------------------------------------------------
 # PyInstaller metadata fix — must run BEFORE any dash/plotly import.
@@ -48,6 +56,7 @@ import storage_manager
 import uld_stack_manager
 import oracle_ecomm
 import config as flow_config
+import updater
 from config import ECOMM_FILE, PORT, REFRESH_INTERVAL_MS
 from data_reader import (
     ECOMM_STALE_AFTER_MINUTES,
@@ -65,14 +74,20 @@ from priority_engine import (
     GRP_EN_ROUTE,
     apply_priorities,
 )
+from version import APP_VERSION
+
+# This release target is the Excel/OneDrive edition.  The existing source tree
+# still contains the separate Oracle trial path, but the distributed EXE must
+# not silently switch data sources because a machine-level variable happens to
+# be present.
+if _IS_FROZEN:
+    os.environ["FLOW_ECOMM_SOURCE"] = "excel"
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Assets path + vendor check
 # ---------------------------------------------------------------------------
-
-_IS_FROZEN = getattr(sys, "frozen", False)
 
 if _IS_FROZEN:
     _assets_path = os.path.join(sys._MEIPASS, "assets")
@@ -2165,6 +2180,7 @@ def api_uld_stack():
 # ---------------------------------------------------------------------------
 
 _COLOR = {
+    "b2b":           "#ef4444",
     "at-hu":         "#ff6b35",
     "driver-active": "#00d4aa",
     "driver-rest":   "#7c72dc",
@@ -4117,10 +4133,12 @@ def _inbound_stat_counts(state: dict) -> dict:
     stored_df = df[is_stored_col] if is_stored_col is not None else df.iloc[0:0]
     today = datetime.now().date()
     live_awbs = set(df["awb"].tolist()) if "awb" in df.columns else set()
-    snapshot_today = len([
-        r for r in storage_manager.get_snapshot_rows(live_awbs)
-        if isinstance(r.get("am_time"), datetime) and r["am_time"].date() == today
-    ])
+    snapshot_today = 0
+    if not (state or {}).get("priority_test_mode"):
+        snapshot_today = len([
+            r for r in storage_manager.get_snapshot_rows(live_awbs)
+            if isinstance(r.get("am_time"), datetime) and r["am_time"].date() == today
+        ])
 
     token_counts = {"all": 0, "at_hu": 0, "driver": 0, "scheduled": 0, "shippable": 0}
     for row in active.to_dict("records"):
@@ -4206,6 +4224,88 @@ def _apply_live_arrival_state(df):
     view["is_en_route"] = view["truck_arrival_time"].apply(lambda t: isinstance(t, datetime) and now < t)
     view = _dedupe_inbound_view_df(view)
     return apply_priorities(view)
+
+
+def _priority_test_df() -> pd.DataFrame:
+    """In-memory inbound rows for the T-key priority test surface."""
+    now = datetime.now()
+
+    def row(
+        awb: str,
+        lmp: str,
+        *,
+        am_time: datetime,
+        in_bud: bool = False,
+        driver_checkin=None,
+        driver_in_rest: bool = False,
+        rest_until=None,
+        shippable: int = 0,
+        total: int = 0,
+        glabs_id: str = "",
+        plate: str = "",
+        status: str = "Felvéve",
+    ) -> dict:
+        ratio = shippable / total if total else 0.0
+        loading_items = [
+            {
+                "awb": f"{awb}-{index + 1}",
+                "lmp": lmp,
+                "status": "Kiadható" if index < shippable else status,
+                "is_ready": index < shippable,
+            }
+            for index in range(total)
+        ]
+        waiting_hours = (
+            max(0.0, (now - driver_checkin).total_seconds() / 3600)
+            if isinstance(driver_checkin, datetime) else 0.0
+        )
+        return {
+            "awb": awb,
+            "lmp": lmp,
+            "bud_lmp": lmp if in_bud else "",
+            "boxes": max(total, 1) * 10,
+            "weight": max(total, 1) * 125.0,
+            "cargo_type": "PLT",
+            "uld_number": "",
+            "am_time": am_time,
+            "status": status,
+            "is_partial": False,
+            "is_stored": False,
+            "is_shippable": shippable > 0,
+            "in_bud_pallets": in_bud,
+            "driver_checkin": driver_checkin if driver_checkin is not None else pd.NaT,
+            "driver_in_rest": driver_in_rest,
+            "rest_until": rest_until if rest_until is not None else pd.NaT,
+            "waiting_hours": waiting_hours,
+            "glabs_id": glabs_id,
+            "glabs_total": total,
+            "glabs_shippable": shippable,
+            "glabs_ratio": ratio,
+            "glabs_loading_items": loading_items,
+            "glabs_ready_items": loading_items,
+            "rendszam": plate,
+        }
+
+    rows = [
+        # Deliberately weak operational state: B2B must still be absolute #1.
+        row("TESZT-B2B-001", "B2B", am_time=now - timedelta(minutes=35)),
+        row(
+            "TESZT-AT-HU-001", "AT HU", am_time=now - timedelta(hours=1),
+            in_bud=True, driver_in_rest=True, rest_until=now + timedelta(hours=2),
+            shippable=2, total=4, glabs_id="TESZT-GLABS-001", plate="TESZT-001",
+        ),
+        row("TESZT-AGED-001", "TESZT LMP", am_time=now - timedelta(hours=6)),
+        row(
+            "TESZT-DRIVER-001", "TEMU", am_time=now - timedelta(hours=1),
+            in_bud=True, driver_checkin=now - timedelta(minutes=45),
+            shippable=3, total=4, glabs_id="TESZT-GLABS-002", plate="TESZT-002",
+        ),
+        row(
+            "TESZT-UTON-001", "MEEST MD", am_time=now + timedelta(hours=1),
+            status="Értesítő",
+        ),
+    ]
+    return apply_priorities(pd.DataFrame(rows))
 
 
 def _has_due_arrival_transition(df) -> bool:
@@ -4302,29 +4402,36 @@ _COLOR_STORED_INSHIFT  = "#7888a0"
 _COLOR_STORED_MANUAL   = "#e67e22"
 
 
-def _loading_first_children():
-    letters = [
-        html.Span(c, className="ll") if c != " "
-        else html.Span(className="ll ll-sp")
-        for c in "Flow Manager"
-    ]
+def _loading_first_children(state: dict | None = None):
+    state = state or {}
+    progress = max(0, min(99, int(state.get("load_progress") or 1)))
+    stage = str(state.get("load_stage") or "Betöltés indítása")
     return [
-        html.Div(className="l-orb l-orb-1"),
-        html.Div(className="l-orb l-orb-2"),
-        html.Div(className="l-orb l-orb-3"),
         html.Div(className="l-card", children=[
-            html.Div(className="l-logo", children=[
-                html.Div(className="l-title", children=letters),
-                html.Div("HGL Group Hungary · Ecommerce Operations", className="l-sub"),
+            html.Div(className="l-brand", children=[
+                html.Span(className="l-brand-mark", **{"aria-hidden": "true"}),
+                html.Span("Flow Manager", className="l-title"),
             ]),
-            html.Div(className="l-dots", children=[
-                html.Span(className="l-dot"),
-                html.Span(className="l-dot"),
-                html.Span(className="l-dot"),
+            html.Div(className="l-progress-head", children=[
+                html.Div(children=[
+                    html.Div("Adatok betöltése", className="l-heading"),
+                    html.Div(stage, id="loading-stage", className="l-msg", **{"aria-live": "polite"}),
+                ]),
+                html.Div(f"{progress}%", id="loading-percent", className="l-percent"),
             ]),
-            html.Div(className="l-track", children=[html.Div(className="l-fill")]),
-            html.Div("Adatok betöltése...", className="l-msg"),
-            html.Div("Az első indítás ~30 másodpercet vesz igénybe.", className="l-hint"),
+            html.Div(
+                id="loading-track", className="l-track",
+                role="progressbar",
+                **{"aria-label": "Adatok betöltése", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": str(progress)},
+                children=[html.Div(id="loading-fill", className="l-fill", style={"width": f"{progress}%"})],
+            ),
+            html.Button(
+                [html.Kbd("T"), html.Span("Tesztnézet megnyitása")],
+                id="loading-test-btn",
+                className="l-test-btn",
+                n_clicks=0,
+                title="Mintaadatok megnyitása a prioritási felületen",
+            ),
         ]),
     ]
 
@@ -4429,6 +4536,7 @@ def _make_card(
     filter_tokens: str | None = None,
     glabs_color_map: dict | None = None,
     plate_color_map: dict | None = None,
+    test_mode: bool = False,
 ) -> html.Div:
     is_snapshot = row.get("_snapshot", False)
     ck = row.get("priority_color", "standard")
@@ -4436,6 +4544,7 @@ def _make_card(
     is_stored_flag = bool(row.get("is_stored", False))
     is_partial = bool(row.get("is_partial", False))
     is_en_route = bool(row.get("is_en_route", False))
+    is_b2b_priority = bool(row.get("is_b2b_priority", False))
 
     live_stored = betarolt_view and is_stored_flag and not is_snapshot
     if live_stored:
@@ -4447,7 +4556,7 @@ def _make_card(
     else:
         color    = _COLOR.get(ck, "#8b949e")
         card_cls = f"priority-card pcard-{ck}" + (" partial-card" if is_partial else "")
-        if is_en_route:
+        if is_en_route and not is_b2b_priority:
             color = "#e5e7eb"
 
     ship_badge = (html.Span("KIADHATÓ", className="badge-shippable")
@@ -4475,7 +4584,10 @@ def _make_card(
     if is_aged and not betarolt_view and not is_en_route:
         card_cls += " is-aged-card"
 
-    if is_en_route and not betarolt_view:
+    if test_mode:
+        # Test rows are display-only and must never reach shared storage.
+        store_el = html.Span()
+    elif is_en_route and not betarolt_view:
         # Úton lévő tételt nem lehet betárolni — még meg sem érkezett.
         store_el = html.Span()
     elif is_snapshot or (betarolt_view and not can_unstore):
@@ -4497,7 +4609,7 @@ def _make_card(
 
     notes_count = (
         len(notes_manager.get_notes(awb))
-        if awb and not betarolt_view and not is_en_route else 0
+        if awb and not betarolt_view and not is_en_route and not test_mode else 0
     )
     note_badge = (
         html.Span(str(notes_count), className="badge-note",
@@ -4506,8 +4618,8 @@ def _make_card(
     )
 
     header = html.Div(className="card-strip", style={"background": color}, children=[
-        html.Span("" if is_en_route and not betarolt_view else f"#{row.get('rank', '–')}", className="rank-num"),
-        html.Span("" if is_en_route and not betarolt_view else row.get("priority_label", ""), className="priority-label-text"),
+        html.Span("" if is_en_route and not betarolt_view and not is_b2b_priority else f"#{row.get('rank', '–')}", className="rank-num"),
+        html.Span("" if is_en_route and not betarolt_view and not is_b2b_priority else row.get("priority_label", ""), className="priority-label-text"),
         store_el,
         aged_badge,
         ship_badge,
@@ -4631,7 +4743,7 @@ def _make_card(
     # Shared notes: only on active INBOUND cards (not on the Betárolt view)
     notes_block = (
         _make_notes_block(awb)
-        if awb and not betarolt_view and not is_en_route
+        if awb and not betarolt_view and not is_en_route and not test_mode
         else html.Span()
     )
 
@@ -5261,7 +5373,17 @@ def _truck_drilldown_rows(info: dict) -> list:
     return items
 
 
-def _truck_sidebar_items(rows: list[dict], plate_color_map: dict[str, str], limit: int = 24) -> list:
+def _truck_sidebar_items(
+    rows: list[dict],
+    plate_color_map: dict[str, str],
+    limit: int = 24,
+    allow_store: bool = True,
+) -> list:
+    # Synthetic priority-view rows must never expose a shared-state action,
+    # even if a stale callback invocation supplies the default flag.
+    allow_store = allow_store and not any(
+        str(row.get("awb") or "").startswith("TESZT-") for row in rows
+    )
     ordered = _truck_groups(rows, plate_color_map)
     if not ordered:
         return [
@@ -5296,7 +5418,7 @@ def _truck_sidebar_items(rows: list[dict], plate_color_map: dict[str, str], limi
         ]
         if en_route_truck:
             head_children.append(html.Span("Úton", className="truck-route-badge"))
-        else:
+        elif allow_store:
             # Storing only makes sense once the truck is physically here.
             head_children.append(html.Button(
                 "Betárolva",
@@ -5306,15 +5428,29 @@ def _truck_sidebar_items(rows: list[dict], plate_color_map: dict[str, str], limi
                 title=f"A kamion minden aktív tétele betárolva: {awb_count} tétel",
             ))
 
-        meta_children = [
-            html.Span(f"{awb_count} tétel", className="truck-awb-count"),
+        fact_children = [
+            *comp_chips,
+            html.Span(
+                [html.Strong(str(awb_count)), html.Span("tétel")],
+                className="truck-awb-count",
+            ),
         ]
         if not en_route_truck and info["shippable"]:
-            meta_children.append(html.Span(f"{info['shippable']} kiadható", className="truck-ship-count"))
+            fact_children.append(html.Span(
+                [html.Strong(str(info["shippable"])), html.Span("kiadható")],
+                className="truck-ship-count",
+            ))
+        pickup_time = None
         if en_route_truck and first_eta:
-            meta_children.append(html.Span(f"Érk. {_fmt_dt(first_eta)}", className="truck-pickup-time"))
+            pickup_time = html.Span([
+                html.Span("Érk.", className="truck-time-label"),
+                html.Span(_fmt_dt(first_eta), className="truck-time-value"),
+            ], className="truck-pickup-time")
         elif first_am:
-            meta_children.append(html.Span(f"Felvéve {_fmt_dt(first_am)}", className="truck-pickup-time"))
+            pickup_time = html.Span([
+                html.Span("Felvéve", className="truck-time-label"),
+                html.Span(_fmt_dt(first_am), className="truck-time-value"),
+            ], className="truck-pickup-time")
         focus_label = info["plate"] + (f" · {_fmt_dt(first_am)}" if first_am else "")
 
         card_cls = "truck-sidebar-card truck-focus-source" + (" is-en-route" if en_route_truck else "")
@@ -5339,9 +5475,13 @@ def _truck_sidebar_items(rows: list[dict], plate_color_map: dict[str, str], limi
                 },
                 children=[
                     html.Div(className="truck-sidebar-head", children=head_children),
-                    html.Div(className="truck-sidebar-meta", children=meta_children),
-                    html.Div(className="truck-uld-types", children=comp_chips) if comp_chips else html.Span(),
-                    html.Div(className="truck-sidebar-drill", children=_truck_drilldown_rows(info)),
+                    html.Div(className="truck-sidebar-meta", children=[
+                        html.Div(className="truck-sidebar-facts", children=fact_children),
+                        pickup_time if pickup_time is not None else html.Span(),
+                    ]),
+                    html.Div(className="truck-sidebar-drill", children=[
+                        html.Div(className="truck-sidebar-drill-inner", children=_truck_drilldown_rows(info)),
+                    ]),
                 ],
             )
         )
@@ -7037,6 +7177,7 @@ def _make_filter_chips(
 
 app.layout = html.Div(id="layout-root", children=[
     dcc.Interval(id="poll", interval=5000, n_intervals=0),
+    dcc.Interval(id="loading-poll", interval=750, n_intervals=0),
     dcc.Interval(id="tick", interval=10000, n_intervals=0),
     dcc.Interval(id="activity-tick", interval=30000, n_intervals=0),
     dcc.Store(id="last-refresh-ts"),
@@ -7049,6 +7190,7 @@ app.layout = html.Div(id="layout-root", children=[
     dcc.Store(id="flow-mode-applied"),
     dcc.Store(id="active-filter", data="all"),
     dcc.Store(id="active-filter-applied"),
+    dcc.Store(id="priority-test-mode", data=False),
     dcc.Store(id="loader-color-applied"),
     dcc.Store(id="overlay-state", data="first"),
     dcc.Store(id="kézi-refresh-store"),
@@ -7445,9 +7587,12 @@ app.layout = html.Div(id="layout-root", children=[
     # Liquid glass scroll fade edge
     html.Div(className="scroll-fade"),
 
-    # Loading overlay — children and class are set dynamically by update_overlay callback
+    # Keep both overlay modes mounted so progress and animation don't restart on each poll.
     html.Div(id="overlay", className="loading-overlay loading-first",
-             children=_loading_first_children()),
+             children=[
+                 html.Div(className="l-first-wrap", children=_loading_first_children()),
+                 html.Div(className="l-refresh-wrap", children=_loading_refresh_children()),
+             ]),
 
     # INBOUND "Összegzés" — TOP 10 priority modal
     html.Div(id="summary-overlay", className="summary-overlay", style={"display": "none"}, children=[
@@ -8113,6 +8258,7 @@ def update_legend(flow_mode, _data_version):
         ]
     else:
         items = [
+            ("#ef4444", "B2B · abszolút első prioritás"),
             ("#ff6b35", "Kategórián belül: AT/HU > TEMU > MD"),
             ("#00d4aa", "Sofőr helyszínen · sok kiadható"),
             ("#4a9eff", "Sofőr helyszínen · kevés kiadható"),
@@ -8134,14 +8280,15 @@ def update_legend(flow_mode, _data_version):
     Input("flow-mode", "data"),
     Input("data-version", "data"),
     Input("store-action", "data"),
+    Input("priority-test-mode", "data"),
 )
-def update_truck_sidebar(flow_mode, _data_version, _store_action):
+def update_truck_sidebar(flow_mode, _data_version, _store_action, priority_test_mode):
     if flow_mode != "inbound":
         return html.Span()
     state = data_cache.get_state()
-    if state.get("status") == "loading" and state.get("refresh_count", 0) == 0:
+    if not priority_test_mode and state.get("status") == "loading" and state.get("refresh_count", 0) == 0:
         return html.Span()
-    df = _apply_live_arrival_state(state.get("df"))
+    df = _priority_test_df() if priority_test_mode else _apply_live_arrival_state(state.get("df"))
     if df is None or df.empty:
         return _truck_sidebar_items([], {})
     if "awb" in df.columns:
@@ -8154,7 +8301,7 @@ def update_truck_sidebar(flow_mode, _data_version, _store_action):
     not_stored = df[~df["is_stored"]].copy() if "is_stored" in df.columns else df.copy()
     rows = not_stored.to_dict("records")
     plate_color_map = _truck_plate_color_map(_active_truck_palette_rows(df))
-    return _truck_sidebar_items(rows, plate_color_map)
+    return _truck_sidebar_items(rows, plate_color_map, allow_store=not bool(priority_test_mode))
 
 
 # ---------------------------------------------------------------------------
@@ -8434,9 +8581,10 @@ app.clientside_callback(
     Input("poll",         "n_intervals"),
     Input("store-action", "data"),
     Input("flow-mode",    "data"),
+    Input("priority-test-mode", "data"),
     State("data-version", "data"),
 )
-def update_stat_counts(_poll, _store, flow_mode, current_data_version):
+def update_stat_counts(_poll, _store, flow_mode, priority_test_mode, current_data_version):
     flow_mode = flow_mode or "inbound"
     state = data_cache.get_state()
     data_version = state.get("data_version", 0)
@@ -8473,7 +8621,11 @@ def update_stat_counts(_poll, _store, flow_mode, current_data_version):
             "Lezárt",
         )
 
-    counts = _inbound_stat_counts(state)
+    count_state = (
+        {"df": _priority_test_df(), "priority_test_mode": True}
+        if priority_test_mode else state
+    )
+    counts = _inbound_stat_counts(count_state)
     if counts["all"] == "–":
         return "–", "–", "–", "–", "–", "–", "Aktív tétel", "AT/HU", "Sofőr helyszínen", "Nincs itt / pihenőn", "Kiadható", "Betárolt tételek"
     return (
@@ -8554,37 +8706,42 @@ app.clientside_callback(
 
 @app.callback(
     Output("overlay",             "className"),
-    Output("overlay",             "children"),
     Output("overlay",             "style"),
     Output("overlay-state",       "data"),
-    Input("poll",                 "n_intervals"),
+    Input("loading-poll",         "n_intervals"),
     Input("kézi-refresh-store", "data"),
     Input("store-action",         "data"),
+    Input("priority-test-mode",   "data"),
     State("overlay-state",        "data"),
 )
-def update_overlay(_poll, _kézi, _store, current_ov_state):
+def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
     state = data_cache.get_state()
     status       = state["status"]
     refresh_count = state.get("refresh_count", 0)
     refreshing   = state.get("refreshing", False)
+    update_phase = updater.get_status().get("phase")
+    update_active = update_phase in {"checking", "downloading", "installing"}
 
-    if status == "loading" and refresh_count == 0:
-        # First load — full screen overlay
+    if priority_test_mode:
+        # Test data is deliberately independent from the source read. Operators
+        # can open it during a cold start or an empty operational shift.
+        new_state = "test"
+        new_cls = no_update
+        new_style = {"display": "none"}
+    elif (status == "loading" and refresh_count == 0) or update_active:
+        # First load — compact progress panel over the existing UI.
         new_state = "first"
         new_cls   = "loading-overlay loading-first"
-        new_ch    = _loading_first_children()
         new_style = {"display": "flex"}
     elif refreshing and refresh_count >= 1:
         # Background refresh (kézi or timer) — non-blocking pill + topbar
         new_state = "refresh"
         new_cls   = "loading-overlay loading-refresh"
-        new_ch    = _loading_refresh_children()
         new_style = {"display": "flex"}
     else:
         # Kész / idle
         new_state = "done"
         new_cls   = no_update
-        new_ch    = no_update
         new_style = {"display": "none"}
 
     if new_state == current_ov_state:
@@ -8595,10 +8752,31 @@ def update_overlay(_poll, _kézi, _store, current_ov_state):
         # observes refreshing=True, the state never leaves "done" and that
         # client-shown overlay would otherwise stay stuck on screen. Re-sending
         # display:none every poll guarantees it gets hidden within one tick.
-        if new_state == "done":
-            return no_update, no_update, {"display": "none"}, no_update
-        return no_update, no_update, no_update, no_update
-    return new_cls, new_ch, new_style, new_state
+        if new_state in {"done", "test"}:
+            return no_update, {"display": "none"}, no_update
+        return no_update, no_update, no_update
+    return new_cls, new_style, new_state
+
+
+@app.callback(
+    Output("loading-stage", "children"),
+    Output("loading-percent", "children"),
+    Output("loading-fill", "style"),
+    Output("loading-track", "aria-valuenow"),
+    Input("loading-poll", "n_intervals"),
+)
+def update_loading_progress(_poll):
+    state = data_cache.get_state()
+    update = updater.get_status()
+    if update.get("phase") in {"checking", "downloading", "installing"}:
+        progress = max(0, min(99, int(update.get("progress") or 1)))
+        stage = str(update.get("message") or "GitHub Releases ellenőrzése")
+    else:
+        progress = max(0, min(99, int(state.get("load_progress") or 1)))
+        stage = str(state.get("load_stage") or "Betöltés indítása")
+    # Keep the existing four-output callback contract; the stage line carries
+    # the update-specific status while the compact heading remains stable.
+    return stage, f"{progress}%", {"width": f"{progress}%"}, str(progress)
 
 
 @app.callback(
@@ -8611,9 +8789,10 @@ def update_overlay(_poll, _kézi, _store, current_ov_state):
     Input("kézi-refresh-store",   "data"),
     Input("store-action",           "data"),
     Input("note-action",            "data"),
+    Input("priority-test-mode",     "data"),
     State("data-version",           "data"),
 )
-def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_version):
+def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode, current_data_version):
     _last_poll_time[0] = time.time()
     flow_mode = flow_mode or "inbound"
     state = data_cache.get_state()
@@ -8623,8 +8802,9 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_versi
     except Exception:
         triggered_ids = {ctx.triggered_id} if ctx.triggered_id else set()
     poll_only = triggered_ids == {"poll"} or (not triggered_ids and ctx.triggered_id == "poll")
+    test_active = bool(priority_test_mode) and flow_mode == "inbound"
 
-    if state["status"] == "loading" and state.get("refresh_count", 0) == 0:
+    if not test_active and state["status"] == "loading" and state.get("refresh_count", 0) == 0:
         return html.Span(), html.Span(), None, current_data_version
 
     ts = state["last_refresh"].isoformat() if state["last_refresh"] else None
@@ -8649,13 +8829,13 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_versi
         cards = [_make_outbound_card(r, filter_tokens=_outbound_filter_tokens(r)) for r in cards_data]
         return _cards_grid(cards, "cards-grid outbound-grid", "Nincs rakodás ebben a kategóriában."), html.Span(), ts, data_version
 
-    if state["status"] == "error":
+    if not test_active and state["status"] == "error":
         err = html.Div(className="error-toast",
                        children=state["errors"].get("error", "Ismeretlen hiba"))
         return html.Div("Nincs megjeleníthető adat.", className="empty-state"), \
                err, None, data_version
 
-    df = _apply_live_arrival_state(state["df"])
+    df = _priority_test_df() if test_active else _apply_live_arrival_state(state["df"])
     if df is None or df.empty:
         return html.Div("Nincs aktív tétel.", className="empty-state"), \
                html.Span(), None, data_version
@@ -8670,7 +8850,7 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_versi
         stored_df = stored_df.sort_values("_am_sort", ascending=True).drop(columns=["_am_sort"])
 
     # Snapshot items are stored but no longer present in the live sheet; background refresh handles cleanup.
-    snapshots = [
+    snapshots = [] if test_active else [
         r for r in storage_manager.get_snapshot_rows(live_awbs)
         if isinstance(r.get("am_time"), datetime) and r["am_time"].date() == today
     ]
@@ -8686,7 +8866,8 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_versi
 
     cards = [
         _make_card(r, filter_tokens=_inbound_filter_tokens(r),
-                   glabs_color_map=glabs_color_map, plate_color_map=plate_color_map)
+                   glabs_color_map=glabs_color_map, plate_color_map=plate_color_map,
+                   test_mode=test_active)
         for r in active_df.to_dict("records")
     ]
     cards += [
@@ -8704,7 +8885,16 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, current_data_versi
 
     if not cards:
         return html.Div("Nincs aktív tétel.", className="empty-state"), html.Span(), ts, data_version
-    return _cards_grid(cards, "cards-grid", "Nincs tétel ebben a kategóriában."), html.Span(), ts, data_version
+    grid = _cards_grid(cards, "cards-grid", "Nincs tétel ebben a kategóriában.")
+    if test_active:
+        grid = html.Div(className="priority-test-view", children=[
+            html.Div(className="priority-test-banner", role="status", children=[
+                html.Strong("TESZTNÉZET"),
+                html.Span("Szintetikus prioritási tételek · kilépés: T"),
+            ]),
+            grid,
+        ])
+    return grid, html.Span(), ts, data_version
 
 
 # Open/close is clientside so the overlay reacts instantly (no server round-trip).
@@ -8726,11 +8916,12 @@ app.clientside_callback(
 @app.callback(
     Output("summary-body", "children"),
     Input("summary-btn", "n_clicks"),
+    State("priority-test-mode", "data"),
     prevent_initial_call=True,
 )
-def fill_summary(_open_clicks):
+def fill_summary(_open_clicks, priority_test_mode):
     state = data_cache.get_state()
-    df = _apply_live_arrival_state(state.get("df"))
+    df = _priority_test_df() if priority_test_mode else _apply_live_arrival_state(state.get("df"))
     return _build_summary_table(df)
 
 
@@ -9840,6 +10031,7 @@ if __name__ == "__main__":
     print("  [2/2] Adatcache + webszerver indítása...", flush=True)
 
     data_cache.start()
+    updater.start_async()
     threading.Thread(target=_open_browser,        daemon=True).start()
     threading.Thread(target=_shutdown_watchdog,   daemon=True, name="InactivityWatchdog").start()
 

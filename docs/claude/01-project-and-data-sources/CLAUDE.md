@@ -54,12 +54,14 @@ Fájl: `E_COMM nyomonkövetés_24.xlsb`
 Sheet: `E-comm`
 Az olvasó az első 100 sorban az `Ügyfél` + `AWB` címkékből dinamikusan keresi meg
 a szemantikus fejlécsort, a címkék oszlophelyét sem rögzíti fix B/D pozícióra.
-A teljes pandas-import és a gyors ULD-olvasó is a ténylegesen felismert
+A teljes import és a gyors ULD-olvasó is a ténylegesen felismert
 `header_row`-ból és ugyanabból a 21 mezős szemantikus mappingból dolgozik.
 2026-08-25-én a fejléc a 12. Excel sorban volt.
-Olvasó: pandas `pyxlsb`
-Limit: a felismert fejléc utáni adatsoroktól a 25000. Excel sorig olvas; a `nrows`
-értékét a tényleges fejlécsorból számolja. A korábbi 10000 soros KPI-export határt
+Olvasó: közvetlen `pyxlsb` soriteráció, kizárólag a felismert 21 mezővel. A korábbi
+`pandas.read_excel` út a teljes munkalap-materializálás miatt a 2026-09-16-i élő
+fájlon 174+ másodperces teljes betöltést okozott; a célzott olvasóval ugyanaz a
+teljes folyamat 21,3 másodperc volt.
+Limit: a felismert fejléc utáni adatsoroktól a 25000. Excel sorig olvas. A korábbi 10000 soros KPI-export határt
 2026-08-24-vel kinőtte az élő E_COMM: az aktív ULD-k és beérkező tételek már a
 10000. sor után voltak.
 
@@ -98,7 +100,7 @@ Fontos (2026-08-25 ellenőrzés): a read-only auditmásolaton a resolver mind a 
 oszlopot a fenti helyre oldotta fel, a teljes nyers import 11 767 adatsort adott,
 és a teljes `_read_ecomm` kivétel nélkül lefutott (2 aktív sor, 10 053 kiadható
 AWB-kulcs, 30 nyitott ULD). A fejlécsor már nem kerül be ál-adatsorként, mert a
-pandas-import a dinamikusan felismert 12. sort használja tényleges fejlécként.
+import a dinamikusan felismert 12. sort használja tényleges fejlécként.
 
 Fontos (2026-08-25 újraellenőrzés, a mostani betűkkel): a customs mezők szemantikája
 `aq_raw`=AP (Vámkez.k., kezdete), `ar_raw`=AQ (Vámkez.v., vége). Ne térjen vissza

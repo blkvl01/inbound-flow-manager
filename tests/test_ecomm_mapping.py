@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import data_reader
 
@@ -109,6 +110,59 @@ class EcommColumnMappingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "departure_raw .*Tétel indulás"):
             data_reader._resolve_ecomm_column_indices(headers)
+
+    def test_targeted_reader_preserves_helper_rows_and_shifted_columns(self):
+        class Cell:
+            def __init__(self, row, value):
+                self.r = row - 1
+                self.v = value
+
+        class Sheet:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def rows(self):
+                for row_number, values in (
+                    (12, [None, "Ügyfél", "AWB", "Státusz"]),
+                    (13, [None, "B2B", "123-45678901", "Felvéve"]),
+                    (14, [None, None, None, None]),
+                    (15, [None, None, None, "Értesítő"]),
+                ):
+                    yield [Cell(row_number, value) for value in values]
+
+        class Workbook:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get_sheet(self, _name):
+                return Sheet()
+
+        progress = []
+        with patch.object(data_reader, "_source_age_minutes", return_value=2.0), patch.object(
+            data_reader.os.path, "getmtime", return_value=1_789_500_000
+        ), patch.object(data_reader, "_temp_copy", return_value="snapshot.xlsb"), patch.object(
+            data_reader, "_resolve_ecomm_column_map", return_value=({"lmp": 1, "awb": 2, "status_n": 3}, 12)
+        ), patch.object(data_reader, "open_workbook", return_value=Workbook()), patch.object(
+            data_reader.os, "unlink"
+        ):
+            frame, _meta = data_reader._read_ecomm_excel_raw(
+                lambda percent, stage, detail: progress.append((percent, stage, detail))
+            )
+
+        self.assertEqual(len(frame), 2)
+        self.assertEqual(frame.iloc[0].to_dict(), {
+            "lmp": "B2B", "awb": "123-45678901", "status_n": "Felvéve",
+        })
+        self.assertTrue(data_reader._empty(frame.iloc[1]["lmp"]))
+        self.assertTrue(data_reader._empty(frame.iloc[1]["awb"]))
+        self.assertEqual(frame.iloc[1]["status_n"], "Értesítő")
+        self.assertEqual(progress[-1][0], 60)
 
 
 if __name__ == "__main__":

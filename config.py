@@ -10,12 +10,34 @@ _COMPUTERNAME = os.environ.get("COMPUTERNAME") or socket.gethostname() or "unkno
 _BASE         = rf"C:\Users\{_USERNAME}\OneDrive - HGL Group Hungary Kft"
 
 
+def _onedrive_roots() -> list[str]:
+    """Return likely local OneDrive roots without assuming one user profile."""
+    roots: list[str] = []
+    for value in (
+        os.environ.get("FLOW_ONEDRIVE_ROOT"),
+        os.environ.get("OneDriveCommercial"),
+        os.environ.get("OneDrive"),
+        _BASE,
+    ):
+        if value:
+            normalized = os.path.normpath(value)
+            if normalized not in roots:
+                roots.append(normalized)
+    profile = os.environ.get("USERPROFILE") or str(Path.home())
+    profile_root = os.path.join(profile, "OneDrive - HGL Group Hungary Kft")
+    if os.path.normpath(profile_root) not in roots:
+        roots.append(os.path.normpath(profile_root))
+    return roots
+
+
 def _find_onedrive_folder() -> str:
-    for candidate in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
-        path = os.path.join(_BASE, candidate)
-        if os.path.isdir(path):
-            return path
-    return os.path.join(_BASE, "Ecommerce - Dokumentumok")
+    candidates = ("Ecommerce - Dokumentumok", "Ecommerce - Documents")
+    for root in _onedrive_roots():
+        for candidate in candidates:
+            path = os.path.join(root, candidate)
+            if os.path.isdir(path):
+                return path
+    return os.path.join(_onedrive_roots()[0], candidates[0])
 
 
 _DEFAULT = {

@@ -32,6 +32,36 @@ def _row(name, statuses, *, in_bud=False, driver_active=False, shippable=2, arri
 
 
 class PriorityEngineTests(unittest.TestCase):
+    def test_b2b_customer_is_always_first_and_red(self):
+        now = datetime.now()
+        rest_soon = _row("athu_rest_soon", ["Megérkezett"], in_bud=True, shippable=4, am_hours_ago=1)
+        rest_soon["lmp"] = "AT HU"
+        rest_soon["driver_in_rest"] = True
+        rest_soon["rest_until"] = now + timedelta(hours=2)
+        aged = _row("aged", ["Felveve"], in_bud=False, shippable=1, am_hours_ago=8)
+        b2b = _row("b2b", ["Elindult"], in_bud=False, shippable=0,
+                   arrival_offset_hours=3, am_hours_ago=0)
+        b2b["lmp"] = "B2B"
+
+        ranked = priority_engine.apply_priorities(pd.DataFrame([rest_soon, aged, b2b]))
+
+        self.assertEqual(ranked.iloc[0]["name"], "b2b")
+        self.assertEqual(ranked.iloc[0]["rank"], 1)
+        self.assertTrue(bool(ranked.iloc[0]["is_b2b_priority"]))
+        self.assertEqual(ranked.iloc[0]["priority_color"], "b2b")
+        self.assertEqual(ranked.iloc[0]["priority_label"], "B2B - AZONNALI PRIORITÁS")
+
+    def test_b2b_priority_uses_own_customer_not_loading_siblings(self):
+        sibling_only = _row("sibling_only", ["Felvéve"], in_bud=True, driver_active=True, shippable=4)
+        sibling_only["glabs_loading_items"] = [{"status": "Felvéve", "lmp": "B2B"}]
+        own_b2b = _row("own_b2b", ["Felvéve"], in_bud=False, shippable=0)
+        own_b2b["lmp"] = "TEMU / B2B"
+
+        ranked = priority_engine.apply_priorities(pd.DataFrame([sibling_only, own_b2b]))
+
+        self.assertEqual(ranked.iloc[0]["name"], "own_b2b")
+        self.assertFalse(bool(ranked.loc[ranked["name"] == "sibling_only", "is_b2b_priority"].iloc[0]))
+
     def test_operational_bucket_outranks_status_mix(self):
         # Driver on-site + many shippable must beat a not-here/weaker-bucket item even
         # if the latter has a more advanced E_COMM status mix. The status mix is only a

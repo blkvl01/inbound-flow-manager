@@ -45,6 +45,14 @@ class TestOracleCacheSafety(unittest.TestCase):
         self.assertTrue(state["read_stalled"])
         self.assertEqual(state["status"], "ready")
 
+    def test_load_progress_is_clamped_and_published(self):
+        data_cache._set_load_progress(140, "E_COMM adatok", "25 000 / 25 000 sor")
+
+        state = data_cache.get_state()
+        self.assertEqual(state["load_progress"], 100)
+        self.assertEqual(state["load_stage"], "E_COMM adatok")
+        self.assertEqual(state["load_detail"], "25 000 / 25 000 sor")
+
     def test_oracle_source_signature_does_not_depend_on_excel_file_stat(self):
         real_stat = data_cache.os.stat
 
