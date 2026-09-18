@@ -42,8 +42,13 @@ hozzá saját OneDrive-almappát. Ezt a helyet a `FLOW_SHARED_STATE_DIR`
 környezeti változó felülírhatja.
 Ha a OneDrive-mappa nem érhető el, a program helyi tartalék könyvtárat használ.
 
+Ha külön meglévő `shared_state` mappát kell használni, annak útvonala a
+Beállítások / Közös állapotmappa mezőben választható ki. A program ezt a mappát
+nem hozza létre; csak létező és írható mappát fogad el. A mentés újraindítás
+után lép életbe.
+
 A kiadási repository nyilvános, ezért az anonim indítási ellenőrzés a
-`v0.1.1` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
+`v0.1.4` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
 váltani, a biztonságos alternatíva a gépen megadott
 `FLOW_MANAGER_GITHUB_TOKEN`; token nem kerülhet az EXE-be, a manifestbe vagy a
 naplóba.

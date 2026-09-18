@@ -43,6 +43,7 @@ def _find_onedrive_folder() -> str:
 _DEFAULT = {
     "ecomm_file":               rf"{_find_onedrive_folder()}\E_COMM nyomonkövetés_24.xlsb",
     "pallets_file":             rf"{_find_onedrive_folder()}\BUD-Pallets.xlsm",
+    "shared_state_dir":          "",
     "refresh_interval_minutes": 10,
     "port":                     8501,
 }
@@ -204,7 +205,7 @@ def read_config_snapshot() -> dict:
 
 def save_config_updates(updates: dict) -> dict:
     cfg = read_config_snapshot()
-    allowed = {"ecomm_file", "pallets_file", "refresh_interval_minutes", "port"}
+    allowed = {"ecomm_file", "pallets_file", "shared_state_dir", "refresh_interval_minutes", "port"}
     for key, value in (updates or {}).items():
         if key in allowed:
             cfg[key] = value
@@ -212,6 +213,32 @@ def save_config_updates(updates: dict) -> dict:
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     return cfg
+
+
+def pick_shared_directory(current_path: str | None = None) -> str:
+    """Open a native folder picker for an existing shared-state directory."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise RuntimeError("A Windows mappavalaszto nem erheto el ezen a gepen.") from exc
+
+    initial_dir = str(current_path or "").strip().strip('"')
+    if not os.path.isdir(initial_dir):
+        initial_dir = _find_onedrive_folder()
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        return filedialog.askdirectory(
+            title="Valaszd ki a kozos allapotmappat",
+            initialdir=initial_dir if os.path.isdir(initial_dir) else "/",
+            mustexist=True,
+            parent=root,
+        ) or ""
+    finally:
+        root.destroy()
 
 
 def pick_source_file(kind: str, current_path: str | None = None) -> str:

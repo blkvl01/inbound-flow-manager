@@ -6,6 +6,9 @@ Excel/OneDrive munkateret nem módosítja és nem igényel `_internal` mappát.
 Az automatikus leállítás csak 30 perc POST- és böngésző-inaktivitás után
 történik.
 
+A loading képernyő nem tartalmaz tesztnézet-indítót. A közös állapotmappa a
+Beállításokban mappaválasztóval megadható; a program csak meglévő mappát használ.
+
 Kiadási assetek:
 
 - `FlowManager.exe`

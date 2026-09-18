@@ -1814,9 +1814,17 @@ def _uld_stack_success(extra: dict | None = None):
 
 def _settings_payload() -> dict:
     cfg = flow_config.read_config_snapshot()
+    configured_shared_state = str(cfg.get("shared_state_dir") or "").strip()
+    try:
+        active_shared_state = str(storage_manager._shared_base_dir())
+    except OSError:
+        active_shared_state = ""
     return {
         "ecomm_file": cfg.get("ecomm_file", ""),
         "pallets_file": cfg.get("pallets_file", ""),
+        "shared_state_dir": configured_shared_state,
+        "active_shared_state_dir": active_shared_state,
+        "shared_state_dir_exists": bool(configured_shared_state and os.path.isdir(configured_shared_state)),
         "refresh_interval_minutes": int(cfg.get("refresh_interval_minutes", 10) or 10),
         "ecomm_source_mode": oracle_ecomm.get_source_mode(),
         "active_ecomm_file": ECOMM_FILE,
@@ -1840,10 +1848,13 @@ def api_settings_pick():
     from flask import jsonify
     data = request.get_json(force=True, silent=True) or {}
     kind = str(data.get("kind") or "").strip().lower()
-    if kind not in {"ecomm", "pallets"}:
+    if kind not in {"ecomm", "pallets", "shared_state"}:
         return jsonify({"ok": False, "error": "Ismeretlen fajl tipus"}), 400
     try:
-        selected = flow_config.pick_source_file(kind, data.get("current_path"))
+        if kind == "shared_state":
+            selected = flow_config.pick_shared_directory(data.get("current_path"))
+        else:
+            selected = flow_config.pick_source_file(kind, data.get("current_path"))
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     if not selected:
@@ -1858,10 +1869,10 @@ def api_settings():
         return jsonify({"ok": True, "settings": _settings_payload()})
 
     data = request.get_json(force=True, silent=True) or {}
+    current_cfg = flow_config.read_config_snapshot()
     if oracle_ecomm.get_source_mode() == "oracle":
         # Excel paths remain editable fallback settings, but they are not runtime
         # dependencies in full Oracle mode and therefore must not block saving.
-        current_cfg = flow_config.read_config_snapshot()
         ecomm_or_error = str(data.get("ecomm_file") or current_cfg.get("ecomm_file") or "").strip()
         pallets_or_error = str(data.get("pallets_file") or current_cfg.get("pallets_file") or "").strip()
     else:
@@ -1884,9 +1895,13 @@ def api_settings():
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "A frissítési idő csak szám lehet"}), 400
     refresh_minutes = max(1, min(refresh_minutes, 60))
+    shared_state_dir = str(data.get("shared_state_dir") or "").strip().strip('"')
+    if shared_state_dir and not os.path.isdir(shared_state_dir):
+        return jsonify({"ok": False, "error": "A közös állapotmappa nem található"}), 400
     flow_config.save_config_updates({
         "ecomm_file": ecomm_or_error,
         "pallets_file": pallets_or_error,
+        "shared_state_dir": shared_state_dir,
         "refresh_interval_minutes": refresh_minutes,
     })
     activity_log.log_event("settings_save", {"refresh_minutes": refresh_minutes})
@@ -4424,13 +4439,6 @@ def _loading_first_children(state: dict | None = None):
                 role="progressbar",
                 **{"aria-label": "Adatok betöltése", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": str(progress)},
                 children=[html.Div(id="loading-fill", className="l-fill", style={"width": f"{progress}%"})],
-            ),
-            html.Button(
-                [html.Kbd("T"), html.Span("Tesztnézet megnyitása")],
-                id="loading-test-btn",
-                className="l-test-btn",
-                n_clicks=0,
-                title="Mintaadatok megnyitása a prioritási felületen",
             ),
         ]),
     ]
@@ -7673,6 +7681,24 @@ app.layout = html.Div(id="layout-root", children=[
                                         **{"data-kind": "pallets"}),
                             html.Div(id="settings-pallets-active", className="settings-active-path"),
                         ]),
+                    ]),
+                ]),
+                html.Div(className="settings-source-card settings-shared-state-card", children=[
+                    html.Div(className="settings-source-head", children=[
+                        html.Div(children=[
+                            html.Div("Közös állapotmappa", className="settings-source-title"),
+                            html.Div("Betárolva, megjegyzések, stackek és közös állapotfájlok helye",
+                                     className="settings-source-desc"),
+                        ]),
+                        html.Span(id="settings-shared-state-status", className="settings-status-dot"),
+                    ]),
+                    dcc.Input(id="settings-shared-state-path", className="settings-input settings-path-input",
+                              type="text", readOnly=True, placeholder="Automatikus OneDrive-felderítés"),
+                    html.Div(className="settings-source-actions", children=[
+                        html.Button("Mappa kiválasztása", id="settings-shared-state-browse",
+                                    className="settings-browse", n_clicks=0,
+                                    **{"data-kind": "shared_state"}),
+                        html.Div(id="settings-shared-state-active", className="settings-active-path"),
                     ]),
                 ]),
                 html.Div(className="settings-refresh-card", children=[

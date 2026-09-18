@@ -35,11 +35,6 @@
     window.dash_clientside.set_props("active-filter", { data: "all" });
   }
 
-  function activateFromLoadingScreen() {
-    active = true;
-    publish();
-  }
-
   document.addEventListener("keydown", function (event) {
     if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
     if ((event.key || "").toLowerCase() !== "t") return;
@@ -49,10 +44,4 @@
     publish();
   }, true);
 
-  document.addEventListener("click", function (event) {
-    if (!event.target || !event.target.closest) return;
-    if (!event.target.closest("#loading-test-btn")) return;
-    event.preventDefault();
-    activateFromLoadingScreen();
-  }, true);
 })();

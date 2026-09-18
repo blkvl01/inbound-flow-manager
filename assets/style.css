@@ -11931,6 +11931,9 @@ body.flow-outbound-mode .truck-sidebar {
   display: grid;
   gap: 10px;
 }
+.settings-shared-state-card {
+  grid-column: 1 / -1;
+}
 
 .truck-sidebar-card {
   cursor: pointer;

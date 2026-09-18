@@ -3353,18 +3353,24 @@
         var settings = data && data.settings ? data.settings : {};
         var ecomm = settingsField('settings-ecomm-path');
         var pallets = settingsField('settings-pallets-path');
+        var sharedState = settingsField('settings-shared-state-path');
         var mins = settingsField('settings-refresh-minutes');
         var ecommActive = settingsField('settings-ecomm-active');
         var palletsActive = settingsField('settings-pallets-active');
         var ecommStatus = settingsField('settings-ecomm-status');
         var palletsStatus = settingsField('settings-pallets-status');
+        var sharedStateStatus = settingsField('settings-shared-state-status');
+        var sharedStateActive = settingsField('settings-shared-state-active');
         if (ecomm) ecomm.value = settings.ecomm_file || '';
         if (pallets) pallets.value = settings.pallets_file || '';
+        if (sharedState) sharedState.value = settings.shared_state_dir || '';
         if (mins) mins.value = settings.refresh_interval_minutes || 10;
         if (ecommActive) ecommActive.textContent = settings.active_ecomm_file ? ('Most hasznalt: ' + settings.active_ecomm_file) : '';
         if (palletsActive) palletsActive.textContent = settings.active_pallets_file ? ('Most hasznalt: ' + settings.active_pallets_file) : '';
+        if (sharedStateActive) sharedStateActive.textContent = settings.active_shared_state_dir ? ('Aktív: ' + settings.active_shared_state_dir) : '';
         if (ecommStatus) ecommStatus.classList.toggle('settings-status-ok', !!settings.ecomm_file);
         if (palletsStatus) palletsStatus.classList.toggle('settings-status-ok', !!settings.pallets_file);
+        if (sharedStateStatus) sharedStateStatus.classList.toggle('settings-status-ok', !!(settings.shared_state_dir_exists || settings.active_shared_state_dir));
     }
 
     function openSettingsModal() {
@@ -3386,8 +3392,9 @@
     }
 
     function browseSettingsFile(kind, btn) {
-        kind = kind === 'pallets' ? 'pallets' : 'ecomm';
-        var field = settingsField(kind === 'pallets' ? 'settings-pallets-path' : 'settings-ecomm-path');
+        kind = kind === 'pallets' ? 'pallets' : kind === 'shared_state' ? 'shared_state' : 'ecomm';
+        var fieldId = kind === 'pallets' ? 'settings-pallets-path' : kind === 'shared_state' ? 'settings-shared-state-path' : 'settings-ecomm-path';
+        var field = settingsField(fieldId);
         var oldText = btn ? btn.textContent : '';
         if (btn) {
             btn.disabled = true;
@@ -3429,6 +3436,7 @@
         var payload = {
             ecomm_file: (settingsField('settings-ecomm-path') || {}).value || '',
             pallets_file: (settingsField('settings-pallets-path') || {}).value || '',
+            shared_state_dir: (settingsField('settings-shared-state-path') || {}).value || '',
             refresh_interval_minutes: (settingsField('settings-refresh-minutes') || {}).value || 10
         };
         if (save) {
@@ -4874,7 +4882,7 @@
             saveSettingsModal();
             return;
         }
-        var settingsBrowse = e.target.closest('#settings-ecomm-browse, #settings-pallets-browse');
+    var settingsBrowse = e.target.closest('#settings-ecomm-browse, #settings-pallets-browse, #settings-shared-state-browse');
         if (settingsBrowse) {
             e.preventDefault();
             browseSettingsFile(settingsBrowse.dataset.kind || 'ecomm', settingsBrowse);

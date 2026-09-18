@@ -43,6 +43,18 @@ def _shared_base_dir() -> Path:
             return shared_dir
         log.warning("FLOW_SHARED_STATE_DIR unavailable (%s), falling back to exe folder", shared_dir)
 
+    try:
+        from config import read_config_snapshot
+
+        configured = str(read_config_snapshot().get("shared_state_dir") or "").strip()
+        if configured:
+            shared_dir = Path(configured)
+            if shared_dir.is_dir():
+                return shared_dir
+            log.warning("Configured shared-state directory unavailable (%s), using automatic discovery", shared_dir)
+    except (OSError, ImportError, ValueError, TypeError) as exc:
+        log.warning("Configured shared-state discovery failed: %s", exc)
+
     # The one-file release is intentionally started from a user-writable local
     # folder, not from the shared OneDrive workspace.  Keep the multi-user
     # state in the same discovered OneDrive workspace automatically when the

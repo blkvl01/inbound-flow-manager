@@ -162,10 +162,10 @@ class UldApiHelperTests(unittest.TestCase):
         self.assertIn('classList.contains("view-tv-mode")', source)
         self.assertIn('classList.contains("view-kpi-mode")', source)
         self.assertIn('set_props("priority-test-mode"', source)
-        self.assertIn('#loading-test-btn', source)
+        self.assertNotIn('#loading-test-btn', source)
         self.assertIn("publish(attempt + 1)", source)
 
-    def test_first_loading_view_exposes_real_progress_and_test_entry(self):
+    def test_first_loading_view_exposes_real_progress_without_test_entry(self):
         state = {
             "load_progress": 42,
             "load_stage": "E_COMM adatok beolvasása",
@@ -176,7 +176,8 @@ class UldApiHelperTests(unittest.TestCase):
         children = app._loading_first_children(state)
         self.assertIn("42%", _component_text(children))
         self.assertIn("E_COMM adatok beolvasása", _component_text(children))
-        self.assertIn("Tesztnézet megnyitása", _component_text(children))
+        self.assertNotIn("Tesztnézet", _component_text(children))
+        self.assertNotIn("loading-test-btn", _component_text(children))
         progress = _find_by_class(children, "l-track")[0]
         self.assertEqual(progress.role, "progressbar")
         self.assertEqual(progress.to_plotly_json()["props"]["aria-valuenow"], "42")

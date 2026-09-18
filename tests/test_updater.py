@@ -136,6 +136,26 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(shared, workspace)
             self.assertTrue(shared.is_dir())
 
+    def test_selected_shared_state_directory_overrides_automatic_discovery(self):
+        import storage_manager
+
+        with tempfile.TemporaryDirectory() as temp:
+            selected = Path(temp) / "Flow Manager" / "_shared_state"
+            selected.mkdir(parents=True)
+            with patch.dict(os.environ, {"FLOW_SHARED_STATE_DIR": ""}, clear=False):
+                with patch.object(storage_manager.sys, "frozen", True, create=True):
+                    with patch("config.read_config_snapshot", return_value={"shared_state_dir": str(selected)}):
+                        self.assertEqual(storage_manager._shared_base_dir(), selected)
+
+    def test_shared_state_directory_is_persisted_as_a_user_setting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cfg_path = Path(temp) / "config.json"
+            selected = Path(temp) / "Flow Manager" / "_shared_state"
+            selected.mkdir(parents=True)
+            with patch.object(config, "get_config_path", return_value=cfg_path):
+                config.save_config_updates({"shared_state_dir": str(selected)})
+                self.assertEqual(config.read_config_snapshot()["shared_state_dir"], str(selected))
+
     def test_loading_progress_reports_release_download_state(self):
         import app
 
