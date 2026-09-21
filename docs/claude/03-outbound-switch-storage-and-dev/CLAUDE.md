@@ -179,9 +179,10 @@ Tabok:
 ## Tevékenységnapló
 
 Fájl: `activity_log.py`
-Storage: a közös munkamappa gyökerében `activity_YYYY-MM-DD.jsonl`, 30 nap retenció
-(induláskor takarít). A logolás soha nem dobhat hibát és nem blokkol (2s lock
-timeout, hiba esetén az esemény eldobódik).
+Storage: gépenként helyben a `%LOCALAPPDATA%/InboundFlowManager/<COMPUTERNAME>/<USERNAME>/activity_logs`
+mappában `activity_YYYY-MM-DD.jsonl`, 30 nap retenció (induláskor takarít).
+A logolás soha nem dobhat hibát és nem blokkol (2s lock timeout, hiba esetén az
+esemény eldobódik). A közös OneDrive-mappába aktivitásnapló nem kerül.
 
 Logolt események: `app_start/app_stop` (leállási okkal + session perc),
 `page_open`, `store_toggle`, `note_add/note_delete`, `uld_*` (API műveletek),
@@ -199,8 +200,11 @@ Cache fájlok:
 
 ```text
 %LOCALAPPDATA%/InboundFlowManager/<user>/dashboard_cache.pkl
-_shared_state/dashboard_cache.pkl
 ```
+
+A dashboard cache gépenkénti gyorsítótár, ezért nem kerül a közös OneDrive
+állapotmappába. A közös mappában csak az együttműködéshez szükséges állapotok
+maradnak.
 
 Induláskor csak akkor töltődik be cache, ha a forrás Excel fájlok mtime/size signature-je egyezik. Ha bármelyik Excel változott, a cache érvénytelen és a UI loading állapotban marad a friss beolvasás végéig, hogy ne jelenjen meg fals/régi kártya.
 

@@ -139,14 +139,15 @@ def _cached_uld_source_signature(payload: dict) -> dict | None:
 
 
 def _cache_paths() -> list[Path]:
-    paths = [_config_dir() / "dashboard_cache.pkl"]
-    try:
-        shared_path = storage_manager.get_storage_path().parent / "dashboard_cache.pkl"
-        if shared_path not in paths:
-            paths.append(shared_path)
-    except Exception as exc:
-        log.debug("Shared dashboard cache path unavailable: %s", exc)
-    return paths
+    """Return the machine-local dashboard cache path.
+
+    The dashboard cache contains a complete in-memory snapshot and is not
+    collaborative state. Writing it into the shared OneDrive workspace made
+    every successful refresh rewrite a large file and created unnecessary
+    sync traffic. Shared operational state continues to use storage_manager;
+    this cache intentionally remains local to the current user and machine.
+    """
+    return [_config_dir() / "dashboard_cache.pkl"]
 
 
 def _read_cache_file(path: Path) -> dict | None:

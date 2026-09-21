@@ -1,16 +1,15 @@
 """
-Shared activity log for the developer menu.
+Machine-local activity log for the developer menu.
 
-Daily JSONL files directly under <shared>/activity_YYYY-MM-DD.jsonl;
+Daily JSONL files directly under the local application directory;
 one JSON object per line:
   {"ts": "<ISO>", "user": "...", "host": "...", "action": "...", "detail": {...}}
 
 Design constraints:
   - Logging must NEVER block or break the UI: short lock timeout, every
     failure is swallowed (the event is dropped, not retried).
-  - Multiple machines append to the same file over a shared folder, so the
-    append happens under the same lock-file mechanism the other shared
-    state uses.
+  - The append remains lock-protected for multiple app processes on the same
+    machine, but no activity history is written to the shared OneDrive state.
   - Retention: files older than RETENTION_DAYS are deleted on startup.
 """
 import json
@@ -21,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from storage_manager import _shared_base_dir
+from config import _config_dir
 
 log = logging.getLogger(__name__)
 
@@ -35,9 +34,18 @@ _session_started_at = time.time()
 
 
 def _logs_dir() -> Path:
-    # Use the existing operational workspace directly. The app must not create
-    # a project-owned activity-log subdirectory in OneDrive.
-    return _shared_base_dir()
+    """Return the machine-local activity-log directory.
+
+    Activity history is diagnostic/developer data, not collaborative business
+    state. Keeping it local prevents every UI interaction from modifying a
+    shared OneDrive JSONL file. FLOW_ACTIVITY_LOG_DIR is an explicit test or
+    administrator override; normal production runs use the per-user local
+    application directory.
+    """
+    override = os.environ.get("FLOW_ACTIVITY_LOG_DIR", "").strip()
+    path = Path(override) if override else _config_dir() / "activity_logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _day_file(day: str | None = None) -> Path:

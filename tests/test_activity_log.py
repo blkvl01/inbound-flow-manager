@@ -11,16 +11,16 @@ import activity_log
 
 class ActivityLogTests(unittest.TestCase):
     def setUp(self):
-        self._old_shared = os.environ.get("FLOW_SHARED_STATE_DIR")
+        self._old_log_dir = os.environ.get("FLOW_ACTIVITY_LOG_DIR")
         self._tmp = Path(__file__).resolve().parents[1] / "_codex_log_tests" / uuid.uuid4().hex
         self._tmp.mkdir(parents=True, exist_ok=True)
-        os.environ["FLOW_SHARED_STATE_DIR"] = str(self._tmp)
+        os.environ["FLOW_ACTIVITY_LOG_DIR"] = str(self._tmp)
 
     def tearDown(self):
-        if self._old_shared is None:
-            os.environ.pop("FLOW_SHARED_STATE_DIR", None)
+        if self._old_log_dir is None:
+            os.environ.pop("FLOW_ACTIVITY_LOG_DIR", None)
         else:
-            os.environ["FLOW_SHARED_STATE_DIR"] = self._old_shared
+            os.environ["FLOW_ACTIVITY_LOG_DIR"] = self._old_log_dir
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_log_event_appends_jsonl_with_user_and_time(self):

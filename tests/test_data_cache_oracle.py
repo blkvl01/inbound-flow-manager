@@ -19,6 +19,16 @@ class TestOracleCacheSafety(unittest.TestCase):
             data_cache._state.clear()
             data_cache._state.update(self.saved_state)
 
+    def test_dashboard_cache_is_machine_local_not_shared(self):
+        local_dir = Path("C:/local-flow-manager")
+        shared_dir = Path("C:/shared-flow-manager")
+        with patch.object(data_cache, "_config_dir", return_value=local_dir), patch.object(
+            data_cache.storage_manager,
+            "get_storage_path",
+            return_value=shared_dir / "stored_awbs.shared.json",
+        ):
+            self.assertEqual(data_cache._cache_paths(), [local_dir / "dashboard_cache.pkl"])
+
     def test_hard_oracle_failure_keeps_last_successful_dataframe(self):
         good = pd.DataFrame([{"awb": "123-45678901", "weight": 10.0}])
         with data_cache._lock:

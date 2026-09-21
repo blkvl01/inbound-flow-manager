@@ -38,8 +38,10 @@ A közös munkafájlok továbbra is a OneDrive-on maradnak. Az Excel-források
 automatikusan az `Ecommerce - Dokumentumok` vagy `Ecommerce - Documents`
 mappából töltődnek. A közös állapot automatikus célja mindkét esetben:
 `Program HUB\Flow Manager`. A közös `Betárolva`, megjegyzés, override,
-aktivitásnapló és cache fájlok közvetlenül ebbe a már meglévő munkamappába
-kerülnek; a program nem hoz létre hozzá saját OneDrive-almappát. Ezt a helyet
+ULD-állapotfájlok közvetlenül ebbe a már meglévő munkamappába kerülnek; a
+program nem hoz létre hozzá saját OneDrive-almappát. A dashboard cache és a
+fejlesztői aktivitásnapló gépenként helyben, a felhasználó helyi
+alkalmazásmappájában marad, így nem terheli az OneDrive-szinkronizálást. Ezt a helyet
 a `FLOW_SHARED_STATE_DIR` környezeti változó vagy a Beállításokban megadott
 meglévő mappa felülírhatja.
 Ha egyik változat sem található, a fagyasztott EXE indításkor felajánlja egy
@@ -52,7 +54,7 @@ nem hozza létre; csak létező és írható mappát fogad el. A mentés újrain
 után lép életbe.
 
 A kiadási repository nyilvános, ezért az anonim indítási ellenőrzés a
-`v0.1.5` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
+`v0.1.6` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
 váltani, a biztonságos alternatíva a gépen megadott
 `FLOW_MANAGER_GITHUB_TOKEN`; token nem kerülhet az EXE-be, a manifestbe vagy a
 naplóba.
