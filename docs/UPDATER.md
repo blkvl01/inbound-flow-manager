@@ -25,9 +25,11 @@ A manifest kötelező mezői:
 ```
 
 A letöltés az EXE mellett ideiglenes fájlba történik. A méret- és SHA-256
-ellenőrzés nélkül nincs csere. Ezután egy rövid életű segédfolyamat megvárja a
-főfolyamat kilépését, ismét ellenőrzi a hash-t, `os.replace` művelettel cserél,
-majd elindítja az új EXE-t.
+ellenőrzés nélkül nincs csere. A lassú kapcsolatokat 30 perces letöltési ablak
+és legfeljebb három próbálkozás kezeli; a legalább kétórás, korábbi félbehagyott
+ideiglenes fájlok induláskor biztonságosan takaríthatók. Ezután egy rövid életű
+segédfolyamat megvárja a főfolyamat kilépését, ismét ellenőrzi a hash-t,
+`os.replace` művelettel cserél, majd elindítja az új EXE-t.
 
 Az EXE-nek írható helyről kell futnia, például a felhasználó Downloads vagy
 `%LOCALAPPDATA%` mappájából. Rendszergazdai jogosultság nem kell, de
@@ -57,7 +59,7 @@ nem hozza létre; csak létező és írható mappát fogad el. A mentés újrain
 után lép életbe.
 
 A kiadási repository nyilvános, ezért az anonim indítási ellenőrzés a
-`v0.1.8` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
+`v0.1.9` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
 váltani, a biztonságos alternatíva a gépen megadott
 `FLOW_MANAGER_GITHUB_TOKEN`; token nem kerülhet az EXE-be, a manifestbe vagy a
 naplóba.

@@ -1,4 +1,9 @@
-# Inbound Flow Manager – v0.1.8
+# Inbound Flow Manager – v0.1.9
+
+Az automatikus GitHub-frissítés stabilabb lett lassú vagy időszakosan akadozó
+kapcsolat esetén. A letöltési időkorlát 30 percre nőtt, hálózati hiba esetén a
+program legfeljebb háromszor újrapróbálja a letöltést, és a legalább kétórás
+félbehagyott ideiglenes frissítési fájlokat induláskor kitakarítja.
 
 Az E_COMM beolvasás legfeljebb a 25 000. Excel-sorig dolgozik. Az ULD-lista
 gyors útvonala először a helyi OneDrive-fájlt olvassa, és csak szükség esetén

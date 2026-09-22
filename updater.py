@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,8 +32,10 @@ HELPER_ARG = "--flow-manager-update-helper"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 _USER_AGENT = "Inbound-Flow-Manager-Updater/1"
 _CHUNK_SIZE = 256 * 1024
-_DOWNLOAD_READ_TIMEOUT_S = 15.0
-_DOWNLOAD_DEADLINE_S = 120.0
+_DOWNLOAD_READ_TIMEOUT_S = 30.0
+_DOWNLOAD_DEADLINE_S = 30 * 60.0
+_DOWNLOAD_ATTEMPTS = 3
+_STALE_STAGE_AGE_S = 2 * 60 * 60.0
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEMVER_RE = re.compile(
     r"^v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
@@ -270,66 +273,100 @@ def verify_file(path: str | os.PathLike[str], expected_size: int, expected_sha25
     return size == int(expected_size) and digest == str(expected_sha256).lower()
 
 
+def _cleanup_stale_stages(target_dir: Path) -> None:
+    """Remove abandoned update stages without touching a recent download."""
+    cutoff = time.time() - _STALE_STAGE_AGE_S
+    for stage in target_dir.glob(".FlowManager-update-*.tmp"):
+        try:
+            if stage.stat().st_mtime < cutoff:
+                stage.unlink()
+        except OSError:
+            # OneDrive may briefly hold an old stage; it is safe to leave it
+            # for the next startup rather than fail the actual update.
+            continue
+
+
 def _download_to_stage(release: dict[str, Any], target_dir: Path, opener: Callable[..., Any] | None = None) -> Path:
     package = release["manifest"]["package"]
     if not target_dir.is_dir():
         raise UpdateError("A futó EXE mappája nem érhető el.")
-    fd, raw_path = tempfile.mkstemp(prefix=".FlowManager-update-", suffix=".tmp", dir=target_dir)
-    os.close(fd)
-    stage = Path(raw_path)
-    started = time.monotonic()
-    try:
-        request = urllib.request.Request(
-            release["download_url"],
-            headers={
-                "Accept": "application/octet-stream",
-                "User-Agent": _USER_AGENT,
-                **({"Authorization": f"Bearer {os.environ.get('FLOW_MANAGER_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN')}"}
-                   if (os.environ.get("FLOW_MANAGER_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")) else {}),
-            },
-        )
-        open_fn = opener or urllib.request.urlopen
-        with open_fn(request, timeout=_DOWNLOAD_READ_TIMEOUT_S) as response, stage.open("wb") as stream:
-            downloaded = 0
-            while True:
-                if time.monotonic() - started >= _DOWNLOAD_DEADLINE_S:
-                    raise UpdateError("A frissítés letöltése túllépte az időkorlátot.")
-                chunk = response.read(_CHUNK_SIZE)
-                if not chunk:
-                    break
-                stream.write(chunk)
-                downloaded += len(chunk)
-                percent = min(95, 10 + int(downloaded * 85 / package["size"]))
-                _set_status("downloading", "Új Flow Manager letöltése", percent, available_version=release["version"])
-        _set_status(
-            "verifying",
-            "Letöltött Flow Manager ellenőrzése",
-            96,
-            available_version=release["version"],
-        )
+    _cleanup_stale_stages(target_dir)
 
-        def report_hash_progress(total: int) -> None:
-            if package["size"] > 0:
-                percent = min(99, 96 + int(total * 3 / package["size"]))
-            else:
-                percent = 99
+    last_error: Exception | None = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        fd, raw_path = tempfile.mkstemp(prefix=".FlowManager-update-", suffix=".tmp", dir=target_dir)
+        os.close(fd)
+        stage = Path(raw_path)
+        started = time.monotonic()
+        keep_stage = False
+        try:
+            request = urllib.request.Request(
+                release["download_url"],
+                headers={
+                    "Accept": "application/octet-stream",
+                    "User-Agent": _USER_AGENT,
+                    **({"Authorization": f"Bearer {os.environ.get('FLOW_MANAGER_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN')}"}
+                       if (os.environ.get("FLOW_MANAGER_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")) else {}),
+                },
+            )
+            open_fn = opener or urllib.request.urlopen
+            with open_fn(request, timeout=_DOWNLOAD_READ_TIMEOUT_S) as response, stage.open("wb") as stream:
+                downloaded = 0
+                while True:
+                    if time.monotonic() - started >= _DOWNLOAD_DEADLINE_S:
+                        raise TimeoutError("A frissítés letöltése túllépte az időkorlátot.")
+                    chunk = response.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    downloaded += len(chunk)
+                    percent = min(95, 10 + int(downloaded * 85 / package["size"]))
+                    _set_status("downloading", "Új Flow Manager letöltése", percent, available_version=release["version"])
             _set_status(
                 "verifying",
                 "Letöltött Flow Manager ellenőrzése",
-                percent,
+                96,
                 available_version=release["version"],
             )
 
-        size, digest = _hash_file(stage, report_hash_progress)
-        if size != package["size"] or digest != package["sha256"].lower():
-            raise UpdateError("A letöltött EXE mérete vagy SHA-256 értéke nem egyezik.")
-        return stage
-    except Exception:
-        try:
-            stage.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+            def report_hash_progress(total: int) -> None:
+                if package["size"] > 0:
+                    percent = min(99, 96 + int(total * 3 / package["size"]))
+                else:
+                    percent = 99
+                _set_status(
+                    "verifying",
+                    "Letöltött Flow Manager ellenőrzése",
+                    percent,
+                    available_version=release["version"],
+                )
+
+            size, digest = _hash_file(stage, report_hash_progress)
+            if size != package["size"] or digest != package["sha256"].lower():
+                raise UpdateError("A letöltött EXE mérete vagy SHA-256 értéke nem egyezik.")
+            keep_stage = True
+            return stage
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+            last_error = exc
+            if attempt >= _DOWNLOAD_ATTEMPTS:
+                raise UpdateError(
+                    f"A frissítés letöltése sikertelen {_DOWNLOAD_ATTEMPTS} próbálkozás után."
+                ) from exc
+            _set_status(
+                "downloading",
+                f"Letöltési hiba — újrapróbálás ({attempt + 1}/{_DOWNLOAD_ATTEMPTS})",
+                8,
+                available_version=release["version"],
+            )
+            time.sleep(min(2.0 * attempt, 6.0))
+        finally:
+            if not keep_stage:
+                try:
+                    stage.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    raise UpdateError("A frissítés letöltése sikertelen.") from last_error
 
 
 def _helper_command(parent_pid: int, target: Path, stage: Path, package: dict[str, Any]) -> list[str]:

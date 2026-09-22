@@ -113,6 +113,31 @@ class UpdaterTests(unittest.TestCase):
             self.assertGreaterEqual(updater.get_status()["progress"], 96)
             stage.unlink()
 
+    def test_download_retries_transient_network_failure(self):
+        release_json, manifest, exe_bytes = _release_payload()
+        release = updater.parse_release_payload({
+            **release_json,
+            "_manifest": manifest,
+        })
+        calls = 0
+
+        def flaky_opener(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("temporary network stall")
+            return _Response(exe_bytes)
+
+        with tempfile.TemporaryDirectory() as temp:
+            stage = updater._download_to_stage(release, Path(temp), opener=flaky_opener)
+            self.assertEqual(calls, 2)
+            self.assertTrue(updater.verify_file(stage, len(exe_bytes), manifest["package"]["sha256"]))
+            stage.unlink()
+
+    def test_download_window_allows_slow_release_asset(self):
+        self.assertGreaterEqual(updater._DOWNLOAD_DEADLINE_S, 15 * 60)
+        self.assertEqual(updater._DOWNLOAD_ATTEMPTS, 3)
+
     def test_automatic_onedrive_workspace_discovery_uses_available_company_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "Ecommerce - Documents"
