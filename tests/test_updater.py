@@ -120,11 +120,11 @@ class UpdaterTests(unittest.TestCase):
             with patch.dict(os.environ, {"FLOW_ONEDRIVE_ROOT": str(Path(temp))}, clear=False):
                 self.assertEqual(Path(config._find_onedrive_folder()), workspace)
 
-    def test_shared_state_discovery_prefers_program_hub_flow_manager(self):
+    def test_shared_state_discovery_prefers_program_hub_shared_state(self):
         import storage_manager
 
         with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager"
+            workspace = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
             workspace.mkdir(parents=True)
             with patch.dict(os.environ, {"FLOW_SHARED_STATE_DIR": ""}, clear=False), \
                     patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]), \
@@ -136,7 +136,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_shared_state_discovery_supports_localized_ecommerce_documents(self):
         with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp) / "Ecommerce - Dokumentumok" / "Program HUB" / "Flow Manager"
+            workspace = Path(temp) / "Ecommerce - Dokumentumok" / "Program HUB" / "Flow Manager" / "_shared_state"
             workspace.mkdir(parents=True)
             with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
                 self.assertEqual(Path(config._find_shared_state_folder()), workspace)
@@ -146,6 +146,15 @@ class UpdaterTests(unittest.TestCase):
             with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
                 self.assertEqual(config._find_shared_state_folder(), "")
 
+    def test_missing_shared_state_is_created_under_existing_ecommerce_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            documents = Path(temp) / "Ecommerce - Documents"
+            documents.mkdir(parents=True)
+            expected = documents / "Program HUB" / "Flow Manager" / "_shared_state"
+            with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
+                self.assertEqual(config._ensure_shared_state_folder(), str(expected))
+            self.assertTrue(expected.is_dir())
+
     def test_frozen_startup_offers_shared_state_picker_when_auto_discovery_fails(self):
         with tempfile.TemporaryDirectory() as temp:
             cfg_path = Path(temp) / "config.json"
@@ -153,20 +162,20 @@ class UpdaterTests(unittest.TestCase):
             selected.mkdir()
             cfg = {"shared_state_dir": ""}
             with patch.object(config.sys, "frozen", True, create=True), \
-                    patch.object(config, "_find_shared_state_folder", return_value=""), \
+                    patch.object(config, "_discover_shared_state_folder", return_value=""), \
                     patch.object(config, "pick_shared_directory", return_value=str(selected)):
                 result = config._ensure_shared_state_config(cfg, cfg_path)
             self.assertEqual(result["shared_state_dir"], str(selected))
             saved = json.loads(cfg_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["shared_state_dir"], str(selected))
 
-    def test_legacy_project_shared_state_is_migrated_to_program_hub(self):
+    def test_legacy_project_shared_state_is_migrated_to_program_hub_shared_state(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             legacy = root / "Ecommerce - Documents" / "Flow Manager" / "_shared_state"
-            automatic = root / "Ecommerce - Documents" / "Program HUB" / "Flow Manager"
-            legacy.mkdir(parents=True)
+            automatic = root / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
             automatic.mkdir(parents=True)
+            legacy.mkdir(parents=True)
             (legacy / "stored_awbs.shared.json").write_text('{"123": {}}', encoding="utf-8")
             cfg_path = root / "config.json"
             cfg = {"shared_state_dir": str(legacy)}
@@ -185,16 +194,19 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("_shared_state", launcher)
         self.assertNotIn("FLOW_USER_CONFIG_DIR", launcher)
 
-    def test_selected_shared_state_directory_overrides_automatic_discovery(self):
+    def test_selected_shared_state_directory_is_overwritten_by_automatic_discovery(self):
         import storage_manager
 
         with tempfile.TemporaryDirectory() as temp:
             selected = Path(temp) / "Flow Manager" / "_shared_state"
             selected.mkdir(parents=True)
+            automatic = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
+            automatic.mkdir(parents=True)
             with patch.dict(os.environ, {"FLOW_SHARED_STATE_DIR": ""}, clear=False):
                 with patch.object(storage_manager.sys, "frozen", True, create=True):
-                    with patch("config.read_config_snapshot", return_value={"shared_state_dir": str(selected)}):
-                        self.assertEqual(storage_manager._shared_base_dir(), selected)
+                    with patch("config.read_config_snapshot", return_value={"shared_state_dir": str(selected)}), \
+                            patch("config._find_shared_state_folder", return_value=str(automatic)):
+                        self.assertEqual(storage_manager._shared_base_dir(), automatic)
 
     def test_shared_state_directory_is_persisted_as_a_user_setting(self):
         with tempfile.TemporaryDirectory() as temp:

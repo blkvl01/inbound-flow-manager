@@ -82,14 +82,16 @@ Korábbi hiba: néha beragadt a switch/filter, mert server callback késleltette
 
 Fájl: `storage_manager.py`
 
-Közös storage:
+Közös storage a meglévő OneDrive-mappában:
 
 ```text
-_shared_state/stored_awbs.shared.json
-_shared_state/stored_awbs.shared.lock
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\_shared_state\stored_awbs.shared.json
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\_shared_state\stored_awbs.shared.lock
 ```
 
-Ha frozen `.exe`, a shared state az exe mappája mellett van. Ha dev módban fut, a projektmappa mellett.
+Angol OneDrive-mappanév esetén az `Ecommerce - Documents\Program HUB\Flow Manager\_shared_state`
+útvonal használható. A program ezt a közös mappát automatikusan keresi, és a
+korábban kiválasztott eltérő útvonalat induláskor felülírja.
 
 Formátum:
 

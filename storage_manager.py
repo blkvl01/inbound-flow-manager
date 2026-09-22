@@ -43,33 +43,24 @@ def _shared_base_dir() -> Path:
             return shared_dir
         log.warning("FLOW_SHARED_STATE_DIR unavailable (%s), falling back to exe folder", shared_dir)
 
+    # Keep the multi-user state in the canonical discovered OneDrive workspace
+    # automatically when the frozen EXE is used. The saved picker value is
+    # cleared by config startup once this canonical path is available.
     try:
-        from config import read_config_snapshot
+        from config import _find_shared_state_folder, read_config_snapshot
+
+        shared_state_folder = _find_shared_state_folder()
+        if shared_state_folder:
+            return Path(shared_state_folder)
 
         configured = str(read_config_snapshot().get("shared_state_dir") or "").strip()
         if configured:
             shared_dir = Path(configured)
             if shared_dir.is_dir():
                 return shared_dir
-            log.warning("Configured shared-state directory unavailable (%s), using automatic discovery", shared_dir)
+            log.warning("Configured shared-state directory unavailable (%s), using local fallback", shared_dir)
     except (OSError, ImportError, ValueError, TypeError) as exc:
-        log.warning("Configured shared-state discovery failed: %s", exc)
-
-    # The one-file release is intentionally started from a user-writable local
-    # folder, not from the shared OneDrive workspace.  Keep the multi-user
-    # state in the same discovered OneDrive workspace automatically when the
-    # frozen EXE is used and no explicit override was supplied.
-    if getattr(sys, "frozen", False):
-        try:
-            from config import _find_shared_state_folder
-
-            shared_state_folder = _find_shared_state_folder()
-            if shared_state_folder:
-                # Use the existing operational workspace directly. Do not
-                # create a project-owned OneDrive subdirectory.
-                return Path(shared_state_folder)
-        except (OSError, ImportError) as exc:
-            log.warning("Automatic OneDrive shared-state discovery failed: %s", exc)
+        log.warning("Shared-state discovery failed: %s", exc)
 
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent

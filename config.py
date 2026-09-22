@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import sys
+import time
 from pathlib import Path
 
 _USERNAME     = os.environ.get("USERNAME", "default")
@@ -13,12 +14,14 @@ _BASE         = rf"C:\Users\{_USERNAME}\OneDrive - HGL Group Hungary Kft"
 def _onedrive_roots() -> list[str]:
     """Return likely local OneDrive roots without assuming one user profile."""
     roots: list[str] = []
-    for value in (
+    values = [
         os.environ.get("FLOW_ONEDRIVE_ROOT"),
         os.environ.get("OneDriveCommercial"),
         os.environ.get("OneDrive"),
-        _BASE,
-    ):
+    ]
+    values.extend(_registered_onedrive_roots())
+    values.append(_BASE)
+    for value in values:
         if value:
             normalized = os.path.normpath(value)
             if normalized not in roots:
@@ -28,6 +31,37 @@ def _onedrive_roots() -> list[str]:
     if os.path.normpath(profile_root) not in roots:
         roots.append(os.path.normpath(profile_root))
     return roots
+
+
+def _registered_onedrive_roots() -> list[str]:
+    """Read locally configured OneDrive account roots without scanning disks."""
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+
+        roots: list[str] = []
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\OneDrive\Accounts",
+        ) as accounts_key:
+            index = 0
+            while True:
+                try:
+                    account_name = winreg.EnumKey(accounts_key, index)
+                except OSError:
+                    break
+                index += 1
+                try:
+                    with winreg.OpenKey(accounts_key, account_name) as account_key:
+                        user_folder, _ = winreg.QueryValueEx(account_key, "UserFolder")
+                    if user_folder:
+                        roots.append(str(user_folder))
+                except OSError:
+                    continue
+        return roots
+    except (ImportError, OSError):
+        return []
 
 
 def _find_onedrive_folder() -> str:
@@ -45,7 +79,8 @@ def _shared_state_candidates() -> list[Path]:
 
     The executable is distributed separately from OneDrive.  Shared state is
     therefore looked up only in the user's existing company OneDrive tree; no
-    project folder is created as part of discovery.
+    project folder is created as part of discovery.  The canonical workspace
+    is the original Program HUB Flow Manager ``_shared_state`` folder.
     """
     candidates: list[Path] = []
     for root in _onedrive_roots():
@@ -55,6 +90,7 @@ def _shared_state_candidates() -> list[Path]:
                 / documents_name
                 / "Program HUB"
                 / "Flow Manager"
+                / "_shared_state"
             )
             if candidate not in candidates:
                 candidates.append(candidate)
@@ -74,13 +110,46 @@ def _find_shared_state_folder() -> str:
     return ""
 
 
+def _ensure_shared_state_folder() -> str:
+    """Create only the canonical final folder under an existing Ecommerce root."""
+    existing = _find_shared_state_folder()
+    if existing:
+        return existing
+    for candidate in _shared_state_candidates():
+        documents_root = candidate.parents[2]
+        if not documents_root.is_dir():
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def _discover_shared_state_folder(wait_seconds: float = 0.0) -> str:
+    """Resolve the canonical folder, retrying briefly while OneDrive starts."""
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        resolved = _ensure_shared_state_folder()
+        if resolved:
+            return resolved
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(2.0)
+
+
 def _is_legacy_shared_state_path(path: str) -> bool:
-    """Identify the old project-owned OneDrive state folder from prior builds."""
+    """Identify older state locations that should migrate to the canonical path."""
     candidate = os.path.normcase(os.path.abspath(str(path)))
     for root in _onedrive_roots():
         for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
-            legacy = Path(root) / documents_name / "Flow Manager" / "_shared_state"
-            if candidate == os.path.normcase(os.path.abspath(str(legacy))):
+            legacy_paths = (
+                Path(root) / documents_name / "Flow Manager" / "_shared_state",
+                Path(root) / documents_name / "Flow Manager",
+                Path(root) / documents_name / "Program HUB" / "Flow Manager",
+            )
+            if any(candidate == os.path.normcase(os.path.abspath(str(legacy))) for legacy in legacy_paths):
                 return True
     return False
 
@@ -222,22 +291,24 @@ def _pick_files_gui(cfg: dict, cfg_path: Path) -> dict:
 
 
 def _ensure_shared_state_config(cfg: dict, cfg_path: Path) -> dict:
-    """Resolve shared state without creating a OneDrive/project directory."""
+    """Resolve the canonical shared state and overwrite older selections."""
     configured = str(cfg.get("shared_state_dir") or "").strip().strip('"')
-    automatic = _find_shared_state_folder()
-    if configured and _is_legacy_shared_state_path(configured) and automatic:
-        _migrate_legacy_shared_state(Path(configured), Path(automatic))
-        cfg["shared_state_dir"] = ""
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-        print("  [OK] Legacy shared-state path migrated to the existing Program HUB workspace.", flush=True)
+    automatic = _discover_shared_state_folder(
+        wait_seconds=30.0 if getattr(sys, "frozen", False) else 0.0
+    )
+    if automatic:
+        if configured and os.path.normcase(os.path.abspath(configured)) != os.path.normcase(os.path.abspath(automatic)):
+            if _is_legacy_shared_state_path(configured):
+                _migrate_legacy_shared_state(Path(configured), Path(automatic))
+            print(r"  [OK] A korabban kivalasztott shared_state utvonal felulirva a kanonikus Program HUB\Flow Manager\_shared_state mappaval.", flush=True)
+        if cfg.get("shared_state_dir"):
+            cfg["shared_state_dir"] = ""
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        print(f"  [OK] Kozos allapotmappa automatikusan: {automatic}", flush=True)
         return cfg
 
     if configured and os.path.isdir(configured):
-        return cfg
-
-    if automatic:
-        print(f"  [OK] Kozos allapotmappa automatikusan: {automatic}", flush=True)
         return cfg
 
     # Source/test runs should remain non-interactive.  The frozen desktop
