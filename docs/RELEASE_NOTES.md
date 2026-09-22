@@ -1,10 +1,17 @@
-# Inbound Flow Manager – v0.1.7
+# Inbound Flow Manager – v0.1.8
+
+Az E_COMM beolvasás legfeljebb a 25 000. Excel-sorig dolgozik. Az ULD-lista
+gyors útvonala először a helyi OneDrive-fájlt olvassa, és csak szükség esetén
+készít biztonságos munkamásolatot, ezért induláskor nem készül felesleges
+második teljes XLSB-másolat.
+
+A betöltési képernyő a teljes adatbetöltés végéig látható marad, és a százalékos
+progress bar mellett az aktuális műveletet és a feldolgozott sorokat is mutatja.
+
+Az automatikus leállítás POST- és böngésző-inaktivitási határa 2 órára nőtt.
 
 A kiadás egyetlen futtatható fájlja a `FlowManager.exe`. A program a közös
 Excel/OneDrive munkateret nem módosítja és nem igényel `_internal` mappát.
-
-Az automatikus leállítás csak 30 perc POST- és böngésző-inaktivitás után
-történik.
 
 A loading képernyő nem tartalmaz tesztnézet-indítót. A közös állapotmappa
 automatikusan a felhasználó meglévő OneDrive-mappájában, az

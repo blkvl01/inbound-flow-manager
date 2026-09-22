@@ -456,7 +456,10 @@ def refresh_uld_data(force: bool = False) -> bool:
         with _lock:
             _state["uld_refreshing"] = True
             _state["data_version"] += 1
-        uld_data, meta = load_uld_data_fast()
+        with _lock:
+            initial_uld_load = _state.get("status") == "loading" and not _state.get("refresh_count")
+        progress_callback = _set_load_progress if initial_uld_load else None
+        uld_data, meta = load_uld_data_fast(progress_callback=progress_callback)
         if meta.get("error"):
             log.warning("Fast ULD refresh failed: %s", meta.get("error"))
             return False

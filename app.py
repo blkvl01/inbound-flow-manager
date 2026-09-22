@@ -4421,6 +4421,7 @@ def _loading_first_children(state: dict | None = None):
     state = state or {}
     progress = max(0, min(99, int(state.get("load_progress") or 1)))
     stage = str(state.get("load_stage") or "Betöltés indítása")
+    detail = str(state.get("load_detail") or "Adatforrások előkészítése")
     return [
         html.Div(className="l-card", children=[
             html.Div(className="l-brand", children=[
@@ -4431,6 +4432,7 @@ def _loading_first_children(state: dict | None = None):
                 html.Div(children=[
                     html.Div("Adatok betöltése", className="l-heading"),
                     html.Div(stage, id="loading-stage", className="l-msg", **{"aria-live": "polite"}),
+                    html.Div(detail, id="loading-detail", className="l-detail", **{"aria-live": "polite"}),
                 ]),
                 html.Div(f"{progress}%", id="loading-percent", className="l-percent"),
             ]),
@@ -8784,6 +8786,7 @@ def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
 
 @app.callback(
     Output("loading-stage", "children"),
+    Output("loading-detail", "children"),
     Output("loading-percent", "children"),
     Output("loading-fill", "style"),
     Output("loading-track", "aria-valuenow"),
@@ -8798,9 +8801,12 @@ def update_loading_progress(_poll):
     else:
         progress = max(0, min(99, int(state.get("load_progress") or 1)))
         stage = str(state.get("load_stage") or "Betöltés indítása")
-    # Keep the existing four-output callback contract; the stage line carries
-    # the update-specific status while the compact heading remains stable.
-    return stage, f"{progress}%", {"width": f"{progress}%"}, str(progress)
+        detail = str(state.get("load_detail") or "Adatforrások előkészítése")
+    # Keep the compact loading panel stable while the stage and detail lines
+    # follow the current source-read or updater state.
+    if update.get("phase") in {"checking", "downloading", "verifying", "installing"}:
+        detail = "Frissítés ellenőrzése folyamatban"
+    return stage, detail, f"{progress}%", {"width": f"{progress}%"}, str(progress)
 
 
 @app.callback(
@@ -9964,7 +9970,7 @@ _SERVER_HOST = "127.0.0.1"
 # Runtime activity tracking
 # ---------------------------------------------------------------------------
 
-_INACTIVITY_TIMEOUT_MINUTES = 30
+_INACTIVITY_TIMEOUT_MINUTES = 120
 _INACTIVITY_SHUTDOWN_SECONDS = _INACTIVITY_TIMEOUT_MINUTES * 60
 _NO_POST_SHUTDOWN_SECONDS = _INACTIVITY_TIMEOUT_MINUTES * 60
 _last_poll_time: list[float] = [0.0]  # updated by update_dashboard on every poll

@@ -682,7 +682,73 @@ def _fast_uld_data_from_raw(raw: pd.DataFrame, meta: dict | None = None) -> tupl
     return _fast_uld_data_from_records(raw.to_dict("records"), meta)
 
 
-def load_uld_data_fast() -> tuple[list[dict], dict]:
+def _read_uld_records_from_workbook(
+    workbook_path: str,
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> list[dict]:
+    """Read the small ULD column set from one E_COMM workbook path.
+
+    The fast path deliberately reads the live local OneDrive file first.  That
+    avoids making a second full XLSB copy while the full dashboard read is also
+    starting.  The caller falls back to a snapshot when the live file is
+    temporarily locked or changes underneath the reader.
+    """
+    _notify_progress(progress_callback, 7, "ULD-k gyors beolvasása", "E_COMM szerkezetének ellenőrzése")
+    column_index, header_row = _resolve_ecomm_column_map(workbook_path, _ECOMM_ULD_NAMES)
+    lmp_idx = column_index["lmp"]
+    awb_idx = column_index["awb"]
+    gha_idx = column_index["carrier_k"]
+    uld_idx = column_index["uld_raw"]
+    ad_idx = column_index["ad_raw"]
+    am_idx = column_index["am_raw"]
+    records: list[dict] = []
+    max_data_rows = _ecomm_data_nrows(header_row)
+    _notify_progress(
+        progress_callback,
+        9,
+        "ULD-k gyors beolvasása",
+        f"Legfeljebb {_ECOMM_MAX_EXCEL_ROW:,} Excel-sorig".replace(",", " "),
+    )
+    with open_workbook(workbook_path) as wb:
+        with wb.get_sheet("E-comm") as sheet:
+            for row_idx, row in enumerate(sheet.rows(), start=1):
+                excel_row = (row[0].r + 1) if row else row_idx
+                if excel_row <= header_row:
+                    continue
+                if excel_row > _ECOMM_MAX_EXCEL_ROW:
+                    break
+                lmp_raw = row[lmp_idx].v if len(row) > lmp_idx else None
+                awb_raw = row[awb_idx].v if len(row) > awb_idx else None
+                gha_raw = row[gha_idx].v if len(row) > gha_idx else None
+                uld_raw = row[uld_idx].v if len(row) > uld_idx else None
+                ad_raw = row[ad_idx].v if len(row) > ad_idx else None
+                am_raw = row[am_idx].v if len(row) > am_idx else None
+                # Keep every AWB/GHA pair, even when this particular row has no
+                # ULD value. The common resolver can safely backfill a blank ULD
+                # row from another row with the exact same AWB.
+                records.append({
+                    "lmp": lmp_raw,
+                    "awb": awb_raw,
+                    "carrier_k": gha_raw,
+                    "uld_raw": uld_raw,
+                    "ad_raw": ad_raw,
+                    "am_raw": am_raw,
+                })
+                scanned = excel_row - header_row
+                if scanned == 1 or scanned % 500 == 0:
+                    fraction = min(1.0, scanned / max(1, max_data_rows))
+                    _notify_progress(
+                        progress_callback,
+                        9 + round(fraction * 11),
+                        "ULD-k gyors beolvasása",
+                        f"{min(excel_row, _ECOMM_MAX_EXCEL_ROW):,} / {_ECOMM_MAX_EXCEL_ROW:,} sor".replace(",", " "),
+                    )
+    return records
+
+
+def load_uld_data_fast(
+    progress_callback: Optional[Callable[[int, str, str], None]] = None,
+) -> tuple[list[dict], dict]:
     """Read only the E_COMM columns needed by the ULD board.
 
     This is intentionally separate from the full inbound/outbound refresh so
@@ -707,41 +773,22 @@ def load_uld_data_fast() -> tuple[list[dict], dict]:
             meta["ecomm_source_stale"] = True
             return [], meta
 
-        tmp_path = _temp_copy(ECOMM_FILE)
-        column_index, header_row = _resolve_ecomm_column_map(tmp_path, _ECOMM_ULD_NAMES)
-        lmp_idx = column_index["lmp"]
-        awb_idx = column_index["awb"]
-        gha_idx = column_index["carrier_k"]
-        uld_idx = column_index["uld_raw"]
-        ad_idx = column_index["ad_raw"]
-        am_idx = column_index["am_raw"]
-        records: list[dict] = []
-        with open_workbook(tmp_path) as wb:
-            with wb.get_sheet("E-comm") as sheet:
-                for row_idx, row in enumerate(sheet.rows(), start=1):
-                    if row_idx <= header_row:
-                        continue
-                    if row_idx > _ECOMM_MAX_EXCEL_ROW:
-                        break
-                    lmp_raw = row[lmp_idx].v if len(row) > lmp_idx else None
-                    awb_raw = row[awb_idx].v if len(row) > awb_idx else None
-                    gha_raw = row[gha_idx].v if len(row) > gha_idx else None
-                    uld_raw = row[uld_idx].v if len(row) > uld_idx else None
-                    ad_raw = row[ad_idx].v if len(row) > ad_idx else None
-                    am_raw = row[am_idx].v if len(row) > am_idx else None
-                    # Keep every AWB/GHA pair, even when this particular row has no
-                    # ULD value.  The common resolver can safely backfill a blank ULD
-                    # row from another row with the exact same AWB.
-                    records.append({
-                        "lmp": lmp_raw,
-                        "awb": awb_raw,
-                        "carrier_k": gha_raw,
-                        "uld_raw": uld_raw,
-                        "ad_raw": ad_raw,
-                        "am_raw": am_raw,
-                    })
-
-        return _fast_uld_data_from_records(records, meta)
+        try:
+            # This is the common case for a locally hydrated OneDrive file and
+            # avoids a second full XLSB copy during cold start.
+            records = _read_uld_records_from_workbook(ECOMM_FILE, progress_callback)
+        except Exception as direct_exc:
+            log.info("Direct fast ULD read failed; retrying from a snapshot: %s", direct_exc)
+            tmp_path = _temp_copy(ECOMM_FILE)
+            records = _read_uld_records_from_workbook(tmp_path, progress_callback)
+        uld_data, result_meta = _fast_uld_data_from_records(records, meta)
+        _notify_progress(
+            progress_callback,
+            24,
+            "ULD-k előkészítve",
+            f"{len(uld_data):,} aktív ULD".replace(",", " "),
+        )
+        return uld_data, result_meta
     except Exception as exc:
         log.error("Fast ULD read error: %s", exc, exc_info=True)
         meta["error"] = str(exc)

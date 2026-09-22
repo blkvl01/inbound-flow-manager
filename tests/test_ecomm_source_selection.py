@@ -27,6 +27,51 @@ def raw_row(**overrides):
 
 
 class TestEcommSourceSelection(unittest.TestCase):
+    def test_fast_uld_reader_uses_excel_row_number_for_25000_cap(self):
+        class Cell:
+            def __init__(self, row, value):
+                self.r = row - 1
+                self.v = value
+
+        class Sheet:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def rows(self):
+                yield [Cell(1, "header")]
+                yield [Cell(24999, "row-24999")]
+                yield [Cell(25000, "row-25000")]
+                yield [Cell(25001, "must-not-be-read")]
+
+        class Workbook:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get_sheet(self, _name):
+                return Sheet()
+
+        mapping = {
+            "lmp": 0,
+            "awb": 1,
+            "carrier_k": 2,
+            "uld_raw": 3,
+            "ad_raw": 4,
+            "am_raw": 5,
+        }
+        with patch.object(data_reader, "_resolve_ecomm_column_map", return_value=(mapping, 1)), patch.object(
+            data_reader, "open_workbook", return_value=Workbook()
+        ):
+            records = data_reader._read_uld_records_from_workbook("live.xlsb")
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[-1]["lmp"], "row-25000")
+
     def test_oracle_mode_returns_oracle_contract(self):
         frame = pd.DataFrame([raw_row()])
         with patch.object(oracle_ecomm, "get_source_mode", return_value="oracle"), patch.object(

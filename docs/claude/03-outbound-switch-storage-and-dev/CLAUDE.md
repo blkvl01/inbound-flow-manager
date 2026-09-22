@@ -227,9 +227,9 @@ UI poll:
 
 ## CMD / app leállítás
 
-Az app valós böngészős user aktivitást figyel (`mousemove`, `mousedown`, `keydown`, `wheel`, `touchstart`, `scroll`). Ha 30 percig nincs aktivitás, a watchdog `os._exit(0)`-val leállítja a szervert, hogy a közös gépeken ne maradjon nyitva CMD.
+Az app valós böngészős user aktivitást figyel (`mousemove`, `mousedown`, `keydown`, `wheel`, `touchstart`, `scroll`). Ha 2 óráig nincs aktivitás, a watchdog `os._exit(0)`-val leállítja a szervert, hogy a közös gépeken ne maradjon nyitva CMD.
 
-Emellett Flask request szinten minden HTTP `POST` frissíti a `_last_post_time` időbélyeget. Ha 30 percig nincs POST a Dash app felől, a watchdog szintén leállítja a CMD-t. Ez arra az esetre van, amikor a böngésző/tab már nem küld callbackeket, és a CMD-ben nem pörögnek a POST sorok.
+Emellett Flask request szinten minden HTTP `POST` frissíti a `_last_post_time` időbélyeget. Ha 2 óráig nincs POST a Dash app felől, a watchdog szintén leállítja a CMD-t. Ez arra az esetre van, amikor a böngésző/tab már nem küld callbackeket, és a CMD-ben nem pörögnek a POST sorok.
 
 Jelenlegi leállítás:
 
@@ -237,8 +237,8 @@ Jelenlegi leállítás:
 Ctrl+C
 CMD ablak bezárása
 taskkill / folyamat leállítása
-30 perc böngésző inaktivitás
-30 perc POST hiány
+2 óra böngésző inaktivitás
+2 óra POST hiány
 ```
 
 ---

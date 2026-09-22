@@ -442,7 +442,7 @@ def build():
     )
     add_bullet(
         doc,
-        "Ha 30 percig nem használod a felületet, az alkalmazás automatikusan leáll. "
+        "Ha 2 óráig nem használod a felületet, az alkalmazás automatikusan leáll. "
         "Ilyenkor csak indítsd újra.",
     )
 

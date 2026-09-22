@@ -176,6 +176,7 @@ class UldApiHelperTests(unittest.TestCase):
         children = app._loading_first_children(state)
         self.assertIn("42%", _component_text(children))
         self.assertIn("E_COMM adatok beolvasása", _component_text(children))
+        self.assertIn("10 500 / 25 000 sor", _component_text(children))
         self.assertNotIn("Tesztnézet", _component_text(children))
         self.assertNotIn("loading-test-btn", _component_text(children))
         progress = _find_by_class(children, "l-track")[0]
@@ -199,9 +200,11 @@ class UldApiHelperTests(unittest.TestCase):
         with mock.patch.object(app.data_cache, "get_state", return_value={
             "load_progress": 42,
             "load_stage": "E_COMM adatok beolvasása",
+            "load_detail": "10 500 / 25 000 sor",
         }):
-            stage, percent, fill_style, aria_value = app.update_loading_progress(1)
+            stage, detail, percent, fill_style, aria_value = app.update_loading_progress(1)
         self.assertEqual(stage, "E_COMM adatok beolvasása")
+        self.assertEqual(detail, "10 500 / 25 000 sor")
         self.assertEqual(percent, "42%")
         self.assertEqual(fill_style, {"width": "42%"})
         self.assertEqual(aria_value, "42")
