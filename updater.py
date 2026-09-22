@@ -450,6 +450,7 @@ def run_startup_update(
         _set_status("skipped", "Fejlesztői futtatás: frissítés kihagyva", 100)
         return False
     target = Path(target_executable or sys.executable).resolve()
+    _cleanup_stale_stages(target.parent)
     _set_status("checking", "Frissítések ellenőrzése", 3)
     stage: Path | None = None
     try:

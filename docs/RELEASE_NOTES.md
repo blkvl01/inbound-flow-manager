@@ -1,4 +1,4 @@
-# Inbound Flow Manager – v0.1.9
+# Inbound Flow Manager – v0.1.10
 
 Az automatikus GitHub-frissítés stabilabb lett lassú vagy időszakosan akadozó
 kapcsolat esetén. A letöltési időkorlát 30 percre nőtt, hálózati hiba esetén a

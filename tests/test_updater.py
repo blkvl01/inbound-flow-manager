@@ -138,6 +138,24 @@ class UpdaterTests(unittest.TestCase):
         self.assertGreaterEqual(updater._DOWNLOAD_DEADLINE_S, 15 * 60)
         self.assertEqual(updater._DOWNLOAD_ATTEMPTS, 3)
 
+    def test_startup_update_cleans_old_abandoned_stage_before_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "FlowManager.exe"
+            target.write_bytes(b"current")
+            stale = root / ".FlowManager-update-old.tmp"
+            stale.write_bytes(b"partial")
+            old_time = updater.time.time() - updater._STALE_STAGE_AGE_S - 1
+            os.utime(stale, (old_time, old_time))
+            with patch.object(updater, "check_for_update", return_value=None):
+                result = updater.run_startup_update(
+                    current_version="1.0.0",
+                    target_executable=target,
+                    exit_process=False,
+                )
+            self.assertFalse(result)
+            self.assertFalse(stale.exists())
+
     def test_automatic_onedrive_workspace_discovery_uses_available_company_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "Ecommerce - Documents"
