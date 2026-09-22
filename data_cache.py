@@ -71,6 +71,7 @@ _state = {
     "uld_returned": [],
     "uld_archive": [],
     "uld_last_refresh": None,
+    "uld_initial_load_complete": False,
     "uld_refreshing": False,
     "uld_source_signature": None,
 }
@@ -224,7 +225,10 @@ def _load_dashboard_cache() -> bool:
         _state["outbound_errors"] = payload.get("outbound_errors", {})
         _state["issued_awbs"] = payload.get("issued_awbs", set()) or set()
         _state["uld_data"] = payload.get("uld_data", []) or []
-        _state["uld_last_refresh"] = loaded_at if payload.get("uld_data") else None
+        # A warm cache is not a fresh ULD read. Keep the cold-start gate closed
+        # until the fast reader or the full source read completes.
+        _state["uld_last_refresh"] = None
+        _state["uld_initial_load_complete"] = False
         _state["uld_source_signature"] = _cached_uld_source_signature(payload)
         _state["last_refresh"] = loaded_at
         # Cache payloads are written only after a successful source read, so the
@@ -232,14 +236,14 @@ def _load_dashboard_cache() -> bool:
         # a later failed read claimed that no fresh data had ever existed even
         # while the UI was visibly serving the cached snapshot.
         _state["last_success_refresh"] = loaded_at
-        _state["status"] = "ready"
+        _state["status"] = "loading"
         _state["data_version"] += 1
         _state["source_signature"] = payload.get("source_signature")
         _state["refreshing"] = (not payload.get("_source_signature_match", False)) or payload.get("_missing_uld_data", False)
-        _state["load_progress"] = 100
+        _state["load_progress"] = 1
         _state["load_stage"] = "Gyorsítótár betöltve"
-        _state["load_detail"] = "A háttérfrissítés hamarosan elindul"
-        _state["load_started_at"] = None
+        _state["load_detail"] = "Friss Excel- és ULD-adatok betöltése folyamatban"
+        _state["load_started_at"] = datetime.now()
 
     log.info("Dashboard cache loaded from %s (%d rows)", path, len(df))
     return True
@@ -474,6 +478,7 @@ def refresh_uld_data(force: bool = False) -> bool:
             if meta.get("uld_archive") is not None:
                 _state["uld_archive"] = meta.get("uld_archive")
             _state["uld_last_refresh"] = datetime.now()
+            _state["uld_initial_load_complete"] = True
             _state["uld_source_signature"] = source_sig
             if meta.get("ecomm_source_age_minutes") is not None:
                 _state.setdefault("kpi", {})["ecomm_source_age_minutes"] = meta.get("ecomm_source_age_minutes")
@@ -603,11 +608,15 @@ def _mark_read_stalled(reason: str, first: bool):
         _state["refreshing"] = False
         _state["load_stage"] = "A beolvasás elakadt"
         _state["load_detail"] = reason
-        if have_good:
+        if have_good and not first:
             _state["status"] = "ready"   # serving last-good data, just stale
         elif first:
-            _state["status"] = "error"
-            _state["errors"] = {"error": f"Az adatforrás jelenleg nem olvasható ({reason})."}
+            if have_good:
+                # Do not expose a warm cache as the finished first view.
+                _state["status"] = "loading"
+            else:
+                _state["status"] = "error"
+                _state["errors"] = {"error": f"Az adatforrás jelenleg nem olvasható ({reason})."}
         _state["data_version"] += 1
     log.warning("Cache: read stalled — keeping last good data (%s)", reason)
 
@@ -633,6 +642,9 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
             and _state["uld_last_refresh"] > read_started_at
         )
         effective_uld_data = list(_state.get("uld_data") or []) if fast_uld_is_newer else uld_data
+        if not fast_uld_is_newer:
+            # The full read is also a valid fallback ULD snapshot.
+            _state["uld_initial_load_complete"] = True
     # Auto-remove stored entries that BUD-Pallets already shows as issued.
     if issued_awbs:
         stored_now = storage_manager.get_stored_awbs()

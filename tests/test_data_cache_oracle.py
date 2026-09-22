@@ -136,6 +136,10 @@ class TestOracleCacheSafety(unittest.TestCase):
         state = data_cache.get_state()
         self.assertEqual(state["last_refresh"], loaded_at)
         self.assertEqual(state["last_success_refresh"], loaded_at)
+        self.assertEqual(state["status"], "loading")
+        self.assertEqual(state["refresh_count"], 0)
+        self.assertFalse(state["uld_initial_load_complete"])
+        self.assertIsNone(state["uld_last_refresh"])
 
 
 if __name__ == "__main__":

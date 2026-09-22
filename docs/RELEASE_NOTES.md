@@ -1,4 +1,8 @@
-# Inbound Flow Manager – v0.1.10
+# Inbound Flow Manager – v0.1.11
+
+A hideg indulás kezelése javítva lett: a korábbi dashboard-cache többé nem
+rejti el túl korán a loading screent. A képernyő addig marad látható, amíg a
+friss Excel-adatok és az első ULD-beolvasás is be nem fejeződik.
 
 Az automatikus GitHub-frissítés stabilabb lett lassú vagy időszakosan akadozó
 kapcsolat esetén. A letöltési időkorlát 30 percre nőtt, hálózati hiba esetén a

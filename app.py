@@ -8384,6 +8384,20 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
         return _no
 
     state    = data_cache.get_state()
+    if state.get("status") == "loading" and not state.get("uld_initial_load_complete"):
+        # The warm dashboard cache must not make the ULD tab look ready before
+        # the first fresh ULD read has completed. The global loading overlay is
+        # still visible, while this keeps the underlying tab honest as well.
+        stacks = _active_stacks(uld_stack_manager.get_stacks_cached())
+        return (
+            _make_uld_loading(),
+            _make_stacks_section(stacks, [], search_text or ""),
+            _make_uld_stats([]),
+            [],
+            None,
+            None,
+            no_update,
+        )
     triggered_ids = set()
     try:
         triggered_ids = {prop_id.split(".")[0] for prop_id in (ctx.triggered_prop_ids or {})}
