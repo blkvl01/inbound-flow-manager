@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import shutil
@@ -6,6 +7,7 @@ import tempfile
 import time
 import unicodedata
 import warnings
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
@@ -13,6 +15,7 @@ from typing import Callable, Optional
 import openpyxl
 import pandas as pd
 from pyxlsb import open_workbook
+from pyxlsb import biff12
 
 from config import ECOMM_FILE, PALLETS_FILE
 import oracle_ecomm
@@ -241,6 +244,48 @@ def _resolve_ecomm_column_map(
     raise ValueError(
         f"Az E_COMM oszlopstruktúrája eltér; a fejléc nem található az első {_ECOMM_HEADER_SCAN_ROWS} sorban"
     )
+
+
+def _iter_selected_xlsb_rows(sheet, indices):
+    """Yield Excel row numbers and values without materialising unused cells.
+
+    pyxlsb's public rows() allocates one Cell per column in the sheet's
+    dimension for every populated row. E_COMM is much wider than the fields we
+    use. Keep its public iterator as a compatibility path for test doubles and
+    future pyxlsb implementations with different internals.
+    """
+    reader = getattr(sheet, "_reader", None)
+    offset = getattr(sheet, "_data_offset", None)
+    strings = getattr(sheet, "_stringtable", None)
+    if reader is None or offset is None or not hasattr(reader, "seek"):
+        for ordinal, row in enumerate(sheet.rows(), start=1):
+            excel_row = row[0].r + 1 if row else ordinal
+            yield excel_row, [row[idx].v if idx < len(row) else None for idx in indices]
+        return
+
+    index_positions = {index: pos for pos, index in enumerate(indices)}
+    reader.seek(offset, os.SEEK_SET)
+    row_number = None
+    values = None
+    for record_type, record in reader:
+        if record_type == biff12.ROW:
+            if values is not None:
+                yield row_number + 1, values
+            row_number = record.r
+            values = [None] * len(indices)
+        elif biff12.BLANK <= record_type <= biff12.FORMULA_BOOLERR:
+            if values is None:
+                continue
+            position = index_positions.get(record.c)
+            if position is not None:
+                value = record.v
+                if record_type == biff12.STRING and strings is not None:
+                    value = strings[value]
+                values[position] = value
+        elif record_type == biff12.SHEETDATA_END:
+            if values is not None:
+                yield row_number + 1, values
+            break
 
 
 _ECOMM_MAX_EXCEL_ROW = 25000  # operational rows have grown beyond the legacy 10,000-row KPI export range
@@ -711,18 +756,14 @@ def _read_uld_records_from_workbook(
     )
     with open_workbook(workbook_path) as wb:
         with wb.get_sheet("E-comm") as sheet:
-            for row_idx, row in enumerate(sheet.rows(), start=1):
-                excel_row = (row[0].r + 1) if row else row_idx
+            for excel_row, values in _iter_selected_xlsb_rows(
+                sheet, [lmp_idx, awb_idx, gha_idx, uld_idx, ad_idx, am_idx]
+            ):
                 if excel_row <= header_row:
                     continue
                 if excel_row > _ECOMM_MAX_EXCEL_ROW:
                     break
-                lmp_raw = row[lmp_idx].v if len(row) > lmp_idx else None
-                awb_raw = row[awb_idx].v if len(row) > awb_idx else None
-                gha_raw = row[gha_idx].v if len(row) > gha_idx else None
-                uld_raw = row[uld_idx].v if len(row) > uld_idx else None
-                ad_raw = row[ad_idx].v if len(row) > ad_idx else None
-                am_raw = row[am_idx].v if len(row) > am_idx else None
+                lmp_raw, awb_raw, gha_raw, uld_raw, ad_raw, am_raw = values
                 # Keep every AWB/GHA pair, even when this particular row has no
                 # ULD value. The common resolver can safely backfill a blank ULD
                 # row from another row with the exact same AWB.
@@ -872,25 +913,51 @@ def _metric_series_like(reference, values=None) -> pd.Series:
     return pd.Series(0.0, index=getattr(reference, "index", None), dtype="float64")
 
 
+def _time_band_hour_totals(serials, weights, boxes, parcels) -> dict[tuple[int, int], list[float]]:
+    """Aggregate every recorded hour once for the historical KPI band views."""
+    numeric = pd.to_numeric(serials, errors="coerce")
+    weight_values = _metric_series_like(numeric, weights)
+    box_values = _metric_series_like(numeric, boxes)
+    parcel_values = _metric_series_like(numeric, parcels)
+    totals: dict[tuple[int, int], list[float]] = {}
+    boundaries: dict[int, list[float]] = {}
+    for serial, weight, box, parcel in zip(numeric, weight_values, box_values, parcel_values):
+        if pd.isna(serial) or not math.isfinite(float(serial)):
+            continue
+        serial = float(serial)
+        day = math.floor(serial)
+        limits = boundaries.get(day)
+        if limits is None:
+            limits = [(day * 86400 + hour * 3600) / 86400 for hour in range(25)]
+            boundaries[day] = limits
+        hour = bisect_right(limits, serial) - 1
+        if 0 <= hour < 24:
+            values = totals.setdefault((day, hour), [0.0, 0.0, 0.0, 0.0])
+            values[0] += 1
+            values[1] += float(weight)
+            values[2] += float(box)
+            values[3] += float(parcel)
+    return totals
+
+
 def _time_band_buckets(serials, weights, now_dt: datetime, epoch: datetime,
-                       boxes=None, parcels=None, day_offset: int = 0) -> list[dict]:
+                       boxes=None, parcels=None, day_offset: int = 0,
+                       hour_totals=None) -> list[dict]:
     """Build 4-hour KPI time bands plus nested 1-hour buckets from Excel serials.
 
     ``day_offset`` shifts the day window back (0 = today, 1 = yesterday). The
     active/current flags compare against ``now_dt``, so a past day is automatically
     fully ``active`` with no ``current`` band."""
-    serials = pd.to_numeric(serials, errors="coerce")
-    weights = _metric_series_like(serials, weights)
-    boxes = _metric_series_like(serials, boxes)
-    parcels = _metric_series_like(serials, parcels)
+    if hour_totals is None:
+        hour_totals = _time_band_hour_totals(serials, weights, boxes, parcels)
     day0 = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=day_offset)
+    day_serial = math.floor((day0 - epoch).total_seconds() / 86400)
 
     def _bucket(h0: int, h1: int) -> dict:
         start_dt = day0 + timedelta(hours=h0)
         end_dt = day0 + timedelta(hours=h1)
-        s0 = (start_dt - epoch).total_seconds() / 86400
-        s1 = (end_dt - epoch).total_seconds() / 86400
-        mask = serials.between(s0, s1, inclusive="left")
+        counts = [hour_totals.get((day_serial, hour), (0.0, 0.0, 0.0, 0.0))
+                  for hour in range(h0, h1)]
 
         return {
             "key": f"{h0:02d}-{h1:02d}",
@@ -898,10 +965,10 @@ def _time_band_buckets(serials, weights, now_dt: datetime, epoch: datetime,
             "start": h0,
             "end": h1,
             "shift": _band_shift(h0),
-            "kg": round(_sum_masked(weights, mask), 1),
-            "count": int(mask.sum()),
-            "colli": round(_sum_masked(boxes, mask), 1),
-            "parcel": round(_sum_masked(parcels, mask), 1),
+            "kg": round(sum(item[1] for item in counts), 1),
+            "count": int(sum(item[0] for item in counts)),
+            "colli": round(sum(item[2] for item in counts), 1),
+            "parcel": round(sum(item[3] for item in counts), 1),
             "active": start_dt <= now_dt,
             "current": start_dt <= now_dt < end_dt,
         }
@@ -915,8 +982,9 @@ def _time_band_buckets(serials, weights, now_dt: datetime, epoch: datetime,
 
 
 def _time_band_inbound(am_f, w, now_dt: datetime, epoch: datetime,
-                       boxes=None, parcels=None, day_offset: int = 0) -> list[dict]:
-    return _time_band_buckets(am_f, w, now_dt, epoch, boxes, parcels, day_offset)
+                       boxes=None, parcels=None, day_offset: int = 0,
+                       hour_totals=None) -> list[dict]:
+    return _time_band_buckets(am_f, w, now_dt, epoch, boxes, parcels, day_offset, hour_totals)
 
 
 def _time_band_outbound(issued, weights, now_dt: datetime,
@@ -948,8 +1016,9 @@ def _time_band_outbound(issued, weights, now_dt: datetime,
 
 
 def _time_band_outbound_ecomm(departure_f, weights, now_dt: datetime, epoch: datetime,
-                              boxes=None, parcels=None, day_offset: int = 0) -> list[dict]:
-    return _time_band_buckets(departure_f, weights, now_dt, epoch, boxes, parcels, day_offset)
+                              boxes=None, parcels=None, day_offset: int = 0,
+                              hour_totals=None) -> list[dict]:
+    return _time_band_buckets(departure_f, weights, now_dt, epoch, boxes, parcels, day_offset, hour_totals)
 
 
 def _time_band_day_offsets(now_dt: datetime, epoch: datetime, *serial_groups) -> list[int]:
@@ -2295,6 +2364,8 @@ def _compute_kpi(raw: pd.DataFrame) -> dict:
             bec_prefixes[st] = sorted(pref_map.values(), key=lambda r: (-r["kg"], r["prefix"]))
 
         band_offsets = _time_band_day_offsets(now_dt, epoch, am_f, dep_f)
+        inbound_hours = _time_band_hour_totals(am_f, w, boxes, parcels)
+        outbound_hours = _time_band_hour_totals(dep_f, w, boxes, parcels)
 
         return {
             "shift_kg":          shift_kg,
@@ -2307,16 +2378,16 @@ def _compute_kpi(raw: pd.DataFrame) -> dict:
             "shift_prev_range":  prev_range,
             "shift_prev_kg":     prev_shift_kg,
             "shift_prev_hourly": prev_hourly,
-            "time_bands_inbound": _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels),
-            "time_bands_outbound": _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels),
-            "time_bands_inbound_prev": _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels, day_offset=1),
-            "time_bands_outbound_prev": _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels, day_offset=1),
+            "time_bands_inbound": _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels, hour_totals=inbound_hours),
+            "time_bands_outbound": _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels, hour_totals=outbound_hours),
+            "time_bands_inbound_prev": _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels, day_offset=1, hour_totals=inbound_hours),
+            "time_bands_outbound_prev": _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels, day_offset=1, hour_totals=outbound_hours),
             "time_bands_inbound_days": {
-                offset: _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels, day_offset=offset)
+                offset: _time_band_inbound(am_f, w, now_dt, epoch, boxes, parcels, day_offset=offset, hour_totals=inbound_hours)
                 for offset in band_offsets
             },
             "time_bands_outbound_days": {
-                offset: _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels, day_offset=offset)
+                offset: _time_band_outbound_ecomm(dep_f, w, now_dt, epoch, boxes, parcels, day_offset=offset, hour_totals=outbound_hours)
                 for offset in band_offsets
             },
             **at_out,
@@ -2404,16 +2475,13 @@ def _read_ecomm_excel_raw(
         max_data_rows = _ecomm_data_nrows(header_row)
         with open_workbook(tmp_path) as wb:
             with wb.get_sheet("E-comm") as sheet:
-                for row in sheet.rows():
-                    excel_row = (row[0].r + 1) if row else 0
+                for excel_row, values in _iter_selected_xlsb_rows(
+                    sheet, [idx for _name, idx in ordered_columns]
+                ):
                     if excel_row <= header_row:
                         continue
                     if excel_row > _ECOMM_MAX_EXCEL_ROW:
                         break
-                    values = [
-                        row[idx].v if idx < len(row) else None
-                        for _name, idx in ordered_columns
-                    ]
                     if any(not _empty(value) for value in values):
                         rows.append(values)
                     scanned = excel_row - header_row
@@ -2757,7 +2825,7 @@ def _read_pallets() -> pd.DataFrame:
             )
             wb = openpyxl.load_workbook(tmp_path, read_only=True, keep_vba=True, data_only=True)
         ws = wb["Rakodások"]
-        for row in ws.iter_rows(min_row=2, values_only=True):
+        for row in ws.iter_rows(min_row=2, max_col=14, values_only=True):
             if not row:
                 continue
             awb = row[1] if len(row) > 1 else None

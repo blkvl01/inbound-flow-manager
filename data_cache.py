@@ -74,6 +74,7 @@ _state = {
     "uld_initial_load_complete": False,
     "uld_refreshing": False,
     "uld_source_signature": None,
+    "defer_fast_uld": False,
 }
 
 
@@ -697,6 +698,15 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         _state["load_started_at"] = None
         row_count = len(_state["df"])
     log.info("Cache: refresh done, %d active items", row_count)
+    with _lock:
+        start_fast_uld = bool(_state.get("defer_fast_uld"))
+        _state["defer_fast_uld"] = False
+    if start_fast_uld:
+        # A cold Excel start already includes usable ULD rows in the full read.
+        # Build the extended ULD history afterwards instead of decoding the
+        # same XLSB simultaneously on two threads and delaying the first view.
+        threading.Thread(target=refresh_uld_data, kwargs={"force": True},
+                         daemon=True, name="ULDDataFast").start()
     return True
 
 
@@ -800,7 +810,11 @@ def start():
             _state["refreshing"] = True
             _state["data_version"] += 1
     worker_delay = 4.0 if cache_loaded else 0.0
-    threading.Thread(target=refresh_uld_data, kwargs={"force": True}, daemon=True, name="ULDDataFast").start()
+    defer_fast_uld = not cache_loaded and oracle_ecomm.get_source_mode() != "oracle"
+    with _lock:
+        _state["defer_fast_uld"] = defer_fast_uld
+    if not defer_fast_uld:
+        threading.Thread(target=refresh_uld_data, kwargs={"force": True}, daemon=True, name="ULDDataFast").start()
     threading.Thread(target=_delayed_worker, args=(worker_delay,), daemon=True, name="DataCache").start()
     threading.Thread(target=_file_watcher, daemon=True, name="FileWatcher").start()
     log.info("Cache: worker started (interval=%.0fs, file-watch=%.0fs)",

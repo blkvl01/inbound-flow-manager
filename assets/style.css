@@ -1357,6 +1357,8 @@ body.view-kpi-switching .bg-orbs::after { animation: viewSwitchVeil 0.76s ease b
 @keyframes kpiHourlyDotIn { to { opacity: 1; } }
 @keyframes kpiHourlyHaloIn { to { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) {
+  .kpi-hourly-area { transition: none; }
+  .kpi-hourly-area.is-shown { opacity: 1; }
   .kpi-hourly-dot, .kpi-hourly-peak { animation: none; opacity: 1; }
   .kpi-hourly-peak-halo { animation: none; opacity: 0.24; }
 }
@@ -1927,6 +1929,22 @@ body.flow-switching .refresh-info {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* Keep source freshness and actions readable between desktop and compact views. */
+@media (min-width: 961px) and (max-width: 1350px) {
+  body:not(.view-kpi-mode) .app-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 10px;
+  }
+  body:not(.view-kpi-mode) .header-kpi {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: center;
+    padding: 0;
+  }
+  body:not(.view-kpi-mode) .header-right { grid-column: 2; grid-row: 1; }
 }
 
 .priority-test-banner {
@@ -31418,4 +31436,32 @@ html.hdr-mini .tv-launch-icon {
 }
 @media (prefers-reduced-motion: reduce) {
   .tv-overlay .tv-stale-banner[data-on="1"] { animation: none; }
+}
+
+/* The KPI switch must not cover source freshness or actions on narrower screens. */
+@media (min-width: 961px) and (max-width: 1350px) {
+  body.view-kpi-mode .app-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 10px;
+  }
+  body.view-kpi-mode .kpi-header-switch {
+    position: static;
+    transform: none;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: center;
+  }
+  body.view-kpi-mode .header-right { grid-column: 2; grid-row: 1; }
+}
+@media (max-width: 960px) {
+  body.view-kpi-mode .app-header { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 10px; }
+  body.view-kpi-mode .header-right { grid-column: 1; grid-row: 2; flex-wrap: wrap; justify-content: flex-start; }
+  body.view-kpi-mode .kpi-header-switch {
+    position: static;
+    transform: none;
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: center;
+  }
 }

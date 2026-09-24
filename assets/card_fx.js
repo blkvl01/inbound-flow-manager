@@ -680,11 +680,12 @@
     var driver   = (card.dataset.tipDriver   || "").trim();
     var progress = (card.dataset.tipProgress || "").trim();
     var color    = card.dataset.plateColor   || "#8b949e";
+    if (!/^#[0-9a-fA-F]{3,8}$/.test(color)) color = "#8b949e";
     if (!plate && !driver && !progress) return "";
     var rows = [];
-    if (plate)    rows.push('<div class="ftip-row"><span class="ftip-label">Rendszám</span><span class="ftip-val" style="color:' + color + '">' + plate + '</span></div>');
-    if (driver)   rows.push('<div class="ftip-row"><span class="ftip-label">Sofőr</span><span class="ftip-val">' + driver + '</span></div>');
-    if (progress) rows.push('<div class="ftip-row"><span class="ftip-label">Rakodás</span><span class="ftip-val">' + progress + '</span></div>');
+    if (plate)    rows.push('<div class="ftip-row"><span class="ftip-label">Rendszám</span><span class="ftip-val" style="color:' + color + '">' + htmlEscape(plate) + '</span></div>');
+    if (driver)   rows.push('<div class="ftip-row"><span class="ftip-label">Sofőr</span><span class="ftip-val">' + htmlEscape(driver) + '</span></div>');
+    if (progress) rows.push('<div class="ftip-row"><span class="ftip-label">Rakodás</span><span class="ftip-val">' + htmlEscape(progress) + '</span></div>');
     return rows.join("");
   }
 

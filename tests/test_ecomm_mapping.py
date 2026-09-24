@@ -1,10 +1,32 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import data_reader
 
 
 class EcommColumnMappingTests(unittest.TestCase):
+    def test_selected_xlsb_iterator_keeps_sparse_rows_and_strings(self):
+        class Reader:
+            def seek(self, offset, whence):
+                self.offset = offset
+
+            def __iter__(self):
+                yield data_reader.biff12.ROW, SimpleNamespace(r=11)
+                yield data_reader.biff12.STRING, SimpleNamespace(c=1, v=0)
+                yield data_reader.biff12.NUM, SimpleNamespace(c=99, v=42)
+                yield data_reader.biff12.ROW, SimpleNamespace(r=13)
+                yield data_reader.biff12.NUM, SimpleNamespace(c=3, v=7)
+                yield data_reader.biff12.SHEETDATA_END, None
+
+        reader = Reader()
+        sheet = SimpleNamespace(_reader=reader, _data_offset=5, _stringtable=["B2B"])
+        self.assertEqual(
+            list(data_reader._iter_selected_xlsb_rows(sheet, [1, 3])),
+            [(12, ["B2B", None]), (14, [None, 7])],
+        )
+        self.assertEqual(reader.offset, 5)
+
     _CURRENT_HEADER_BY_INDEX = {
         1: "Ügyfél",
         3: "AWB",

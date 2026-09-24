@@ -1,4 +1,22 @@
-# Inbound Flow Manager – v0.1.11
+# Inbound Flow Manager – v0.1.12
+
+Az E_COMM olvasó a felismert fejléc alapján továbbra is csak a szükséges 21
+mezőt veszi át, de a széles XLSB munkalap felesleges cellaobjektumait már nem
+hozza létre. A napi KPI idősávok óránkénti értékeit egyszer összesíti, majd
+újrahasználja. Hideg induláskor a bővített ULD-olvasás a teljes betöltés után
+indul, így a két XLSB-bejárás nem versenyez egymással az első képernyő előtt.
+
+A közepes szélességű ablakok operatív és KPI fejlécében a frissességi jelzések,
+vezérlők és mutatók külön sorba rendeződnek. A kártyák súgószövege biztonságosan jeleníti
+meg a forrásból származó értékeket, és a csökkentett mozgás beállításnál a
+diagram nem vár késleltetett áttűnésre.
+
+Helyi, azonos forrás-pillanatképen végzett mérés: 11 646 sor / 21 E_COMM mező,
+nyers beolvasás 13,87 → 10,85 mp; a teljes összeállítás két-két futásának
+átlaga 28,81 → 23,03 mp. Ezek a helyi gép eredményei, más gépen és szinkronállapotban
+eltérhetnek. A nyers adattáblák teljesen egyeztek.
+
+## Előző kiadás: v0.1.11
 
 A hideg indulás kezelése javítva lett: a korábbi dashboard-cache többé nem
 rejti el túl korán a loading screent. A képernyő addig marad látható, amíg a

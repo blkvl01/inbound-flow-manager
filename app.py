@@ -75,6 +75,7 @@ from priority_engine import (
     apply_priorities,
 )
 from version import APP_VERSION
+import hub_presence
 
 # This release target is the Excel/OneDrive edition.  The existing source tree
 # still contains the separate Oracle trial path, but the distributed EXE must
@@ -10001,6 +10002,7 @@ def _shutdown_watchdog():
         if post_idle_seconds >= _NO_POST_SHUTDOWN_SECONDS:
             print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc POST nelkuli allapot - szerver leallitasa...", flush=True)
             activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc POST hiány")
+            hub_presence.stop()
             time.sleep(0.5)
             os._exit(0)
 
@@ -10008,6 +10010,7 @@ def _shutdown_watchdog():
         if idle_seconds >= _INACTIVITY_SHUTDOWN_SECONDS:
             print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc bongeszo inaktivitas - szerver leallitasa...", flush=True)
             activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc inaktivitás")
+            hub_presence.stop()
             time.sleep(0.5)
             os._exit(0)
 
@@ -10034,6 +10037,7 @@ def _register_exit_handlers():
             activity_log.log_session_end(reason)
         except Exception:
             pass
+        hub_presence.stop()
         os._exit(0)
 
     # SIGINT (Ctrl+C) and SIGTERM (taskkill without /F)
@@ -10059,6 +10063,7 @@ def _register_exit_handlers():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    hub_presence.start("inbound", APP_VERSION)
     _register_exit_handlers()
     activity_log.cleanup_old()
     activity_log.log_event("app_start", {"pid": os.getpid()})
@@ -10089,4 +10094,10 @@ if __name__ == "__main__":
     )
     print(flush=True)
 
-    app.run(debug=False, port=PORT, host=_SERVER_HOST, use_reloader=False, threaded=True)
+    try:
+        app.run(debug=False, port=PORT, host=_SERVER_HOST, use_reloader=False, threaded=True)
+    except Exception as exc:
+        hub_presence.event("error", exc)
+        raise
+    finally:
+        hub_presence.stop()

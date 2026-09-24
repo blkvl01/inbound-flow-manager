@@ -12,6 +12,41 @@ import data_reader
 
 
 class KpiPageTests(unittest.TestCase):
+    def test_time_band_hour_totals_match_original_range_masks(self):
+        epoch = datetime(1899, 12, 30)
+        now = datetime(2026, 6, 17, 15, 30)
+        stamps = [
+            datetime(2026, 6, 17, 0, 0),
+            datetime(2026, 6, 17, 9, 59, 59),
+            datetime(2026, 6, 17, 10, 0),
+            datetime(2026, 6, 16, 23, 59),
+        ]
+        serials = pd.Series([(stamp - epoch).total_seconds() / 86400 for stamp in stamps] + [None])
+        weights = pd.Series([1.25, 2.5, 3.75, 4.0, 99.0])
+        boxes = pd.Series([1, 2, 3, 4, 99])
+        parcels = pd.Series([10, 20, 30, 40, 99])
+        totals = data_reader._time_band_hour_totals(serials, weights, boxes, parcels)
+
+        for offset in (0, 1):
+            bands = data_reader._time_band_inbound(
+                serials, weights, now, epoch, boxes, parcels,
+                day_offset=offset, hour_totals=totals,
+            )
+            hours = [hour for band in bands for hour in band["hours"]]
+            day = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=offset)
+            for hour in hours:
+                start = day + timedelta(hours=hour["start"])
+                end = start + timedelta(hours=1)
+                mask = serials.between(
+                    (start - epoch).total_seconds() / 86400,
+                    (end - epoch).total_seconds() / 86400,
+                    inclusive="left",
+                )
+                self.assertEqual(hour["count"], int(mask.sum()))
+                self.assertEqual(hour["kg"], round(float(weights[mask].sum()), 1))
+                self.assertEqual(hour["colli"], round(float(boxes[mask].sum()), 1))
+                self.assertEqual(hour["parcel"], round(float(parcels[mask].sum()), 1))
+
     def test_kpi_page_payload_contains_inbound_and_outbound_shift_series(self):
         kpi = {
             "shift_name": "Jelenlegi",

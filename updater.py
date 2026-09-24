@@ -452,20 +452,25 @@ def run_startup_update(
     target = Path(target_executable or sys.executable).resolve()
     _cleanup_stale_stages(target.parent)
     _set_status("checking", "Frissítések ellenőrzése", 3)
+    import hub_presence
     stage: Path | None = None
     try:
         release = check_for_update(current_version, opener=opener)
         if release is None:
             _set_status("ready", "Nincs újabb verzió", 100)
             return False
+        hub_presence.event("update_started")
         _set_status("downloading", f"Frissítés: {release['version']}", 8, available_version=release["version"])
         stage = _download_to_stage(release, target.parent, opener)
         _set_status("installing", "Frissítés előkészítve, újraindítás…", 100, available_version=release["version"])
         _spawn_helper(os.getpid(), target, stage, release["manifest"]["package"])
+        hub_presence.event("update_ready")
         if exit_process:
+            hub_presence.stop()
             os._exit(0)
         return True
     except (UpdateError, OSError, urllib.error.URLError, ValueError, TypeError) as exc:
+        hub_presence.event("update_failed", exc)
         if stage is not None:
             try:
                 stage.unlink(missing_ok=True)
