@@ -50,6 +50,49 @@ def _release_payload(version="1.2.0", exe_bytes=b"new-flow-manager"):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_helper_uses_separate_executable_and_cleans_up_on_spawn_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "FlowManager.exe"
+            target.write_bytes(b"current executable")
+            stage = root / "new.tmp"
+            stage.write_bytes(b"new executable")
+            package = {"size": stage.stat().st_size, "sha256": hashlib.sha256(stage.read_bytes()).hexdigest()}
+            helper_root = root / "local" / "FlowManager" / "updates"
+            with patch.object(updater, "_helper_dir", return_value=helper_root), \
+                    patch.object(updater.subprocess, "Popen") as launch:
+                updater._spawn_helper(1234, target, stage, package)
+            command = launch.call_args.args[0]
+            helper = Path(command[0])
+            self.assertNotEqual(helper, target)
+            self.assertEqual(helper.parent, helper_root)
+            self.assertEqual(helper.read_bytes(), target.read_bytes())
+            self.assertEqual(command[1], updater.HELPER_ARG)
+
+            with patch.object(updater, "_helper_dir", return_value=helper_root), \
+                    patch.object(updater.subprocess, "Popen", side_effect=OSError("launch failed")):
+                with self.assertRaises(OSError):
+                    updater._spawn_helper(1234, target, stage, package)
+            self.assertEqual(len(list(helper_root.glob("*.exe"))), 1)
+
+    def test_helper_restarts_previous_executable_when_replace_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "FlowManager.exe"
+            target.write_bytes(b"old")
+            stage = root / "new.tmp"
+            stage.write_bytes(b"new")
+            digest = hashlib.sha256(stage.read_bytes()).hexdigest()
+            args = ["helper", updater.HELPER_ARG, "1234", str(target), str(stage), "3", digest]
+            with patch.object(updater, "_wait_for_parent", return_value=True), \
+                    patch.object(updater.os, "replace", side_effect=OSError("locked")), \
+                    patch.object(updater.time, "sleep"), \
+                    patch.object(updater, "_restart_executable", return_value=True) as restart:
+                self.assertEqual(updater.run_helper_cli(args), 4)
+            restart.assert_called_once_with(target.resolve(), None)
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertEqual(stage.read_bytes(), b"new")
+
     def test_version_comparison_supports_v_prefix_prerelease_and_patch_zero(self):
         self.assertLess(updater.compare_versions("1.2.0-rc.1", "v1.2"), 0)
         self.assertEqual(updater.compare_versions("1.2", "1.2.0+build.7"), 0)

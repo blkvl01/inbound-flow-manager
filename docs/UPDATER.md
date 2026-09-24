@@ -28,8 +28,11 @@ A letöltés az EXE mellett ideiglenes fájlba történik. A méret- és SHA-256
 ellenőrzés nélkül nincs csere. A lassú kapcsolatokat 30 perces letöltési ablak
 és legfeljebb három próbálkozás kezeli; a legalább kétórás, korábbi félbehagyott
 ideiglenes fájlok induláskor biztonságosan takaríthatók. Ezután egy rövid életű
-segédfolyamat megvárja a főfolyamat kilépését, ismét ellenőrzi a hash-t,
-`os.replace` művelettel cserél, majd elindítja az új EXE-t.
+segédfolyamat a futó EXE külön, helyi felhasználói mappába másolt példányából
+indul. Megvárja a főfolyamat kilépését, ismét ellenőrzi a hash-t,
+`os.replace` művelettel cserél, majd elindítja az új EXE-t. Az új példány
+eltávolítja a segédmásolatot. Ha a csere mégsem sikerül, a segéd újraindítja a
+korábbi EXE-t; a hiba a `%LOCALAPPDATA%\FlowManager\frissites.log` fájlba kerül.
 
 Az EXE-nek írható helyről kell futnia, például a felhasználó Downloads vagy
 `%LOCALAPPDATA%` mappájából. Rendszergazdai jogosultság nem kell, de
@@ -59,7 +62,9 @@ nem hozza létre; csak létező és írható mappát fogad el. A mentés újrain
 után lép életbe.
 
 A kiadási repository nyilvános, ezért az anonim indítási ellenőrzés a
-`v0.1.11` release-t token nélkül is eléri. Ha később zárt kiadási tárolóra kell
+legújabb release-t token nélkül is eléri. A v0.1.11 és régebbi EXE-kben a
+segéd még a zárolt programfájlból indul: ezeket egyszer kézzel vagy a Program
+HUB-bal kell az új, javított EXE-re cserélni. Ha később zárt kiadási tárolóra kell
 váltani, a biztonságos alternatíva a gépen megadott
 `FLOW_MANAGER_GITHUB_TOKEN`; token nem kerülhet az EXE-be, a manifestbe vagy a
 naplóba.

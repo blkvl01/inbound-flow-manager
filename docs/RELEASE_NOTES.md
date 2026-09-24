@@ -1,4 +1,20 @@
-# Inbound Flow Manager – v0.1.12
+# Inbound Flow Manager – v0.1.14
+
+A Windows önfrissítő külön helyi segédmásolatból végzi az EXE cseréjét, így a
+segédfolyamat nem tartja zárolva a cserélendő programfájlt. A segéd a letöltött
+fájlt csere előtt újra ellenőrzi, sikertelen csere esetén visszaindítja a korábbi
+verziót, és helyi frissítési naplót ír. Sikeres csere után az új verzió indul,
+majd eltávolítja a segédmásolatot.
+
+A v0.1.11 és korábbi telepített EXE-k önfrissítőjében még a zárolási hiba van;
+ezeknél egyszeri kézi vagy Program HUB-os csere szükséges. A v0.1.13-as Git tag
+forrásmentésként létezik, de önálló publikus EXE-kiadás nem készült belőle.
+
+## Korábbi fejlesztések: v0.1.12–v0.1.13
+
+A Program HUB számára a program verziót, futási állapotot és szűkített technikai
+eseményeket jelent a meglévő közös munkatérbe. Üzleti rekord és részletes
+hibaüzenet nem kerül a jelentésbe.
 
 Az E_COMM olvasó a felismert fejléc alapján továbbra is csak a szükséges 21
 mezőt veszi át, de a széles XLSB munkalap felesleges cellaobjektumait már nem

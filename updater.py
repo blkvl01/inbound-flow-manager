@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from version import APP_NAME, APP_VERSION, GITHUB_REPOSITORY, PACKAGE_NAME
 
 MANIFEST_NAME = "manifest.json"
 HELPER_ARG = "--flow-manager-update-helper"
+CLEANUP_HELPER_ARG = "--flow-manager-cleanup-helper"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 _USER_AGENT = "Inbound-Flow-Manager-Updater/1"
 _CHUNK_SIZE = 256 * 1024
@@ -37,6 +39,7 @@ _DOWNLOAD_DEADLINE_S = 30 * 60.0
 _DOWNLOAD_ATTEMPTS = 3
 _STALE_STAGE_AGE_S = 2 * 60 * 60.0
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_HELPER_NAME_RE = re.compile(r"^FlowManager-update-helper-\d+-[0-9a-f]{12}\.exe$")
 _SEMVER_RE = re.compile(
     r"^v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
 )
@@ -369,9 +372,14 @@ def _download_to_stage(release: dict[str, Any], target_dir: Path, opener: Callab
     raise UpdateError("A frissítés letöltése sikertelen.") from last_error
 
 
-def _helper_command(parent_pid: int, target: Path, stage: Path, package: dict[str, Any]) -> list[str]:
+def _helper_dir() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
+    return base / "FlowManager" / "updates"
+
+
+def _helper_command(helper: Path, parent_pid: int, target: Path, stage: Path, package: dict[str, Any]) -> list[str]:
     return [
-        sys.executable,
+        str(helper),
         HELPER_ARG,
         str(int(parent_pid)),
         str(target),
@@ -382,18 +390,32 @@ def _helper_command(parent_pid: int, target: Path, stage: Path, package: dict[st
 
 
 def _spawn_helper(parent_pid: int, target: Path, stage: Path, package: dict[str, Any]) -> None:
+    # Windows keeps a running EXE locked. A helper launched from the target
+    # executable would keep that very file locked after the parent exits.
+    helper_dir = _helper_dir()
+    helper_dir.mkdir(parents=True, exist_ok=True)
+    helper = helper_dir / f"FlowManager-update-helper-{parent_pid}-{os.urandom(6).hex()}.exe"
+    try:
+        shutil.copyfile(target, helper)
+    except OSError:
+        helper.unlink(missing_ok=True)
+        raise
     flags = 0
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(
-        _helper_command(parent_pid, target, stage, package),
-        cwd=str(target.parent),
-        close_fds=True,
-        creationflags=flags,
-    )
+    try:
+        subprocess.Popen(
+            _helper_command(helper, parent_pid, target, stage, package),
+            cwd=str(target.parent),
+            close_fds=True,
+            creationflags=flags,
+        )
+    except OSError:
+        helper.unlink(missing_ok=True)
+        raise
 
 
-def _wait_for_parent(pid: int, timeout: float = 30.0) -> None:
+def _wait_for_parent(pid: int, timeout: float = 60.0) -> bool:
     deadline = time.monotonic() + timeout
     if os.name == "nt":
         import ctypes
@@ -401,16 +423,66 @@ def _wait_for_parent(pid: int, timeout: float = 30.0) -> None:
         if process:
             try:
                 remaining = max(0, int((deadline - time.monotonic()) * 1000))
-                ctypes.windll.kernel32.WaitForSingleObject(process, remaining)
+                return ctypes.windll.kernel32.WaitForSingleObject(process, remaining) == 0
             finally:
                 ctypes.windll.kernel32.CloseHandle(process)
-            return
+        # An already exited process may no longer have an openable PID.
+        if ctypes.windll.kernel32.GetLastError() == 87:
+            return True
+        return False
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except OSError:
-            return
+            return True
         time.sleep(0.1)
+    return False
+
+
+def _log_helper(message: str) -> None:
+    try:
+        log_path = _helper_dir().parent / "frissites.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except OSError:
+        pass
+
+
+def _restart_executable(target: Path, helper: Path | None = None) -> bool:
+    command = [str(target)]
+    if helper is not None:
+        command.extend((CLEANUP_HELPER_ARG, str(helper)))
+    for attempt in range(3):
+        try:
+            subprocess.Popen(command, cwd=str(target.parent), close_fds=True)
+            return True
+        except OSError as exc:
+            _log_helper(f"Újraindítási kísérlet {attempt + 1}/3 sikertelen: {exc}")
+            time.sleep(1)
+    return False
+
+
+def schedule_helper_cleanup_from_arguments(argv: list[str] | None = None) -> None:
+    args = list(argv or sys.argv)
+    if CLEANUP_HELPER_ARG not in args:
+        return
+    index = args.index(CLEANUP_HELPER_ARG)
+    if index + 1 >= len(args):
+        return
+    candidate = Path(args[index + 1]).resolve()
+    if candidate.parent != _helper_dir().resolve() or not _HELPER_NAME_RE.fullmatch(candidate.name):
+        return
+
+    def remove_after_exit() -> None:
+        for _ in range(60):
+            try:
+                candidate.unlink(missing_ok=True)
+                return
+            except OSError:
+                time.sleep(1)
+
+    threading.Thread(target=remove_after_exit, name="UpdateHelperCleanup", daemon=True).start()
 
 
 def run_helper_cli(argv: list[str] | None = None) -> int:
@@ -425,16 +497,29 @@ def run_helper_cli(argv: list[str] | None = None) -> int:
         return 2
     target_path = Path(target).resolve()
     stage_path = Path(stage).resolve()
-    _wait_for_parent(parent_pid)
+    helper_path = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+    if not _wait_for_parent(parent_pid):
+        _log_helper("A korábbi folyamat nem állt le az időkorláton belül; a csere elmaradt.")
+        return 5
     if not verify_file(stage_path, size, digest):
         stage_path.unlink(missing_ok=True)
+        _log_helper("A letöltött EXE ellenőrzése sikertelen; a korábbi verzió újraindul.")
+        _restart_executable(target_path, helper_path)
         return 3
-    try:
-        os.replace(stage_path, target_path)
-    except OSError:
-        stage_path.unlink(missing_ok=True)
-        return 4
-    subprocess.Popen([str(target_path)], cwd=str(target_path.parent), close_fds=True)
+    for attempt in range(60):
+        try:
+            os.replace(stage_path, target_path)
+            break
+        except OSError as exc:
+            if attempt == 59:
+                _log_helper(f"Az EXE cseréje sikertelen: {exc}; a korábbi verzió újraindul.")
+                _restart_executable(target_path, helper_path)
+                return 4
+            time.sleep(1)
+    _log_helper("Az EXE cseréje sikeres; az új verzió indul.")
+    if not _restart_executable(target_path, helper_path):
+        _log_helper("Az új EXE nem indult el automatikusan.")
+        return 6
     return 0
 
 

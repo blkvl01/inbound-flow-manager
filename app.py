@@ -4,6 +4,9 @@ import sys
 if __name__ == "__main__" and "--flow-manager-update-helper" in sys.argv:
     import updater as _updater_helper
     raise SystemExit(_updater_helper.run_helper_cli(sys.argv))
+if __name__ == "__main__" and "--flow-manager-cleanup-helper" in sys.argv:
+    import updater as _updater_cleanup
+    _updater_cleanup.schedule_helper_cleanup_from_arguments(sys.argv)
 
 import ctypes
 import ctypes.wintypes
