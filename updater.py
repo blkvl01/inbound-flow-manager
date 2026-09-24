@@ -32,6 +32,8 @@ MANIFEST_NAME = "manifest.json"
 HELPER_ARG = "--flow-manager-update-helper"
 CLEANUP_HELPER_ARG = "--flow-manager-cleanup-helper"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+LATEST_MANIFEST_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/{MANIFEST_NAME}"
+LATEST_PACKAGE_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/{PACKAGE_NAME}"
 _USER_AGENT = "Inbound-Flow-Manager-Updater/1"
 _CHUNK_SIZE = 256 * 1024
 _DOWNLOAD_READ_TIMEOUT_S = 30.0
@@ -225,20 +227,17 @@ def _request_json(url: str, opener: Callable[..., Any] | None = None) -> Any:
 
 
 def _load_release(opener: Callable[..., Any] | None = None) -> dict[str, Any]:
-    payload = _request_json(API_URL, opener)
-    manifest_url = None
-    if isinstance(payload, dict):
-        for asset in payload.get("assets") or []:
-            if isinstance(asset, dict) and asset.get("name") == MANIFEST_NAME:
-                manifest_url = str(asset.get("browser_download_url") or "")
-                break
-    if not manifest_url or not manifest_url.startswith("https://"):
-        raise UpdateError("A release manifest assetje nem érhető el.")
-    manifest = _request_json(manifest_url, opener)
-    payload = dict(payload) if isinstance(payload, dict) else payload
-    if isinstance(payload, dict):
-        payload["_manifest"] = manifest
-    return parse_release_payload(payload)
+    # The public latest/download redirect is not subject to the shared
+    # anonymous api.github.com hourly limit. The manifest supplies version,
+    # package name, exact size, and SHA-256 before any executable is accepted.
+    manifest = validate_manifest(_request_json(LATEST_MANIFEST_URL, opener))
+    return {
+        "tag": f"v{manifest['version']}",
+        "version": manifest["version"],
+        "manifest": manifest,
+        "download_url": LATEST_PACKAGE_URL,
+        "manifest_url": LATEST_MANIFEST_URL,
+    }
 
 
 def check_for_update(

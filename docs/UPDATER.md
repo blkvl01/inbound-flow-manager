@@ -1,8 +1,9 @@
 # GitHub Releases frissítés
 
 Az Inbound Flow Manager indítás után a
-`https://api.github.com/repos/blkvl01/inbound-flow-manager/releases/latest`
-címen keresi a legfrissebb GitHub Release-t. Csak a `manifest.json` által
+`https://github.com/blkvl01/inbound-flow-manager/releases/latest/download/manifest.json`
+közvetlen publikus címen keresi a legfrissebb GitHub Release manifestjét. Ez az
+útvonal nem függ a GitHub névtelen API-jának óránkénti korlátjától. Csak a `manifest.json` által
 azonosított, az aktuálisnál újabb `FlowManager.exe` fogadható el.
 
 Ez a kiadási csomag az Excel/OneDrive adatforrást rögzíti. A forráskódban

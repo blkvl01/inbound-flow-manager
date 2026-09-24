@@ -1,4 +1,12 @@
-# Inbound Flow Manager – v0.1.14
+# Inbound Flow Manager – v0.1.15
+
+Az indításkori frissítéskeresés a legújabb publikus kiadás közvetlen
+`manifest.json` letöltési címét használja. Így a közös GitHub API-címen
+jelentkező névtelen óránkénti kéréskorlát nem akadályozza a verzióellenőrzést.
+Az EXE továbbra is csak a manifestben megadott méret és SHA-256 ellenőrzése
+után cserélhető.
+
+## Előző javító kiadás: v0.1.14
 
 A Windows önfrissítő külön helyi segédmásolatból végzi az EXE cseréjét, így a
 segédfolyamat nem tartja zárolva a cserélendő programfájlt. A segéd a letöltött

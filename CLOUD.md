@@ -2,7 +2,7 @@
 
 Nyilvános forrás- és kiadási repó: https://github.com/blkvl01/inbound-flow-manager
 
-Az aktuális hordozható kiadás: `v0.1.14`. A `FlowManager.exe` és a hozzá tartozó
+Az aktuális hordozható kiadás: `v0.1.15`. A `FlowManager.exe` és a hozzá tartozó
 `manifest.json` publikus GitHub Release assetként érhető el; a HUB és az updater
 token nélkül is ezt a kiadást tudja ellenőrizni.
 

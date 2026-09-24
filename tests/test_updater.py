@@ -114,15 +114,22 @@ class UpdaterTests(unittest.TestCase):
             updater.check_for_update("1.0.0", opener=lambda *_args, **_kwargs: _Response({}))
 
     def test_release_is_only_accepted_when_newer_and_manifest_matches_tag(self):
-        release_json, manifest, exe_bytes = _release_payload()
-        responses = iter([_Response(release_json), _Response(manifest)])
-        release = updater.check_for_update("1.0.0", opener=lambda *_args, **_kwargs: next(responses))
-        self.assertEqual(release["version"], "1.2.0")
-        self.assertEqual(release["download_url"], "https://example.test/FlowManager.exe")
+        release_json, manifest, _ = _release_payload()
+        parsed = updater.parse_release_payload({**release_json, "_manifest": manifest})
+        self.assertEqual(parsed["version"], "1.2.0")
+        seen_urls = []
 
-        old_json, old_manifest, _ = _release_payload("1.0.0")
-        responses = iter([_Response(old_json), _Response(old_manifest)])
-        self.assertIsNone(updater.check_for_update("1.0.0", opener=lambda *_args, **_kwargs: next(responses)))
+        def direct_manifest(request, **_kwargs):
+            seen_urls.append(request.full_url)
+            return _Response(manifest)
+
+        release = updater.check_for_update("1.0.0", opener=direct_manifest)
+        self.assertEqual(release["version"], "1.2.0")
+        self.assertEqual(release["download_url"], updater.LATEST_PACKAGE_URL)
+        self.assertEqual(seen_urls, [updater.LATEST_MANIFEST_URL])
+
+        _, old_manifest, _ = _release_payload("1.0.0")
+        self.assertIsNone(updater.check_for_update("1.0.0", opener=lambda *_args, **_kwargs: _Response(old_manifest)))
 
     def test_invalid_github_response_falls_back_to_current_version(self):
         with tempfile.TemporaryDirectory() as temp:
