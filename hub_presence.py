@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 
 _RELATIVE = Path("Ecommerce - Dokumentumok") / "Program HUB"
-_INTERVAL = 120
+_INTERVAL = 30 * 60
 _reporter = None
 
 

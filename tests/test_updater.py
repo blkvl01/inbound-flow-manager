@@ -217,7 +217,7 @@ class UpdaterTests(unittest.TestCase):
         import storage_manager
 
         with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
+            workspace = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager"
             workspace.mkdir(parents=True)
             with patch.dict(os.environ, {"FLOW_SHARED_STATE_DIR": ""}, clear=False), \
                     patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]), \
@@ -229,24 +229,92 @@ class UpdaterTests(unittest.TestCase):
 
     def test_shared_state_discovery_supports_localized_ecommerce_documents(self):
         with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp) / "Ecommerce - Dokumentumok" / "Program HUB" / "Flow Manager" / "_shared_state"
+            workspace = Path(temp) / "Ecommerce - Dokumentumok" / "Program HUB" / "Flow Manager"
             workspace.mkdir(parents=True)
             with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
                 self.assertEqual(Path(config._find_shared_state_folder()), workspace)
 
+    def test_shared_state_discovery_supports_company_folder_below_user_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp)
+            workspace = (
+                profile
+                / "HGL Group Hungary Kft"
+                / "Ecommerce - Dokumentumok"
+                / "Program HUB"
+                / "Flow Manager"
+            )
+            workspace.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": str(profile)}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[]):
+                self.assertEqual(Path(config._find_shared_state_folder()), workspace)
+
+    def test_registered_onedrive_shared_state_precedes_profile_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp) / "profile"
+            registered_root = Path(temp) / "registered-onedrive"
+            registered_workspace = (
+                registered_root
+                / "Ecommerce - Documents"
+                / "Program HUB"
+                / "Flow Manager"
+            )
+            fallback_workspace = (
+                profile
+                / "HGL Group Hungary Kft"
+                / "Ecommerce - Dokumentumok"
+                / "Program HUB"
+                / "Flow Manager"
+            )
+            registered_workspace.mkdir(parents=True)
+            fallback_workspace.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": str(profile)}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[str(registered_root)]):
+                self.assertEqual(Path(config._find_shared_state_folder()), registered_workspace)
+
+    def test_profile_fallback_is_used_when_registered_root_lacks_flow_manager(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp) / "profile"
+            registered_root = Path(temp) / "registered-onedrive"
+            (registered_root / "Ecommerce - Documents").mkdir(parents=True)
+            fallback_workspace = (
+                profile
+                / "HGL Group Hungary Kft"
+                / "Ecommerce - Dokumentumok"
+                / "Program HUB"
+                / "Flow Manager"
+            )
+            fallback_workspace.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": str(profile)}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[str(registered_root)]):
+                self.assertEqual(Path(config._find_shared_state_folder()), fallback_workspace)
+
     def test_missing_shared_state_does_not_invent_a_path(self):
         with tempfile.TemporaryDirectory() as temp:
-            with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
+            with patch.dict(os.environ, {"USERPROFILE": str(Path(temp))}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
                 self.assertEqual(config._find_shared_state_folder(), "")
 
-    def test_missing_shared_state_is_created_under_existing_ecommerce_root(self):
+    def test_missing_flow_manager_folder_is_not_created_under_ecommerce_root(self):
         with tempfile.TemporaryDirectory() as temp:
             documents = Path(temp) / "Ecommerce - Documents"
             documents.mkdir(parents=True)
-            expected = documents / "Program HUB" / "Flow Manager" / "_shared_state"
-            with patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
-                self.assertEqual(config._ensure_shared_state_folder(), str(expected))
-            self.assertTrue(expected.is_dir())
+            expected = documents / "Program HUB" / "Flow Manager"
+            with patch.dict(os.environ, {"USERPROFILE": str(Path(temp))}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[str(Path(temp))]):
+                self.assertEqual(config._ensure_shared_state_folder(), "")
+            self.assertFalse(expected.exists())
+
+    def test_existing_flow_manager_folder_is_used_without_creating_shared_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = Path(temp)
+            documents = profile / "HGL Group Hungary Kft" / "Ecommerce - Dokumentumok"
+            flow_manager = documents / "Program HUB" / "Flow Manager"
+            flow_manager.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": str(profile)}, clear=False), \
+                    patch.object(config, "_onedrive_roots", return_value=[]):
+                self.assertEqual(config._ensure_shared_state_folder(), str(flow_manager))
+            self.assertFalse((flow_manager / "_shared_state").exists())
 
     def test_frozen_startup_offers_shared_state_picker_when_auto_discovery_fails(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -266,7 +334,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             legacy = root / "Ecommerce - Documents" / "Flow Manager" / "_shared_state"
-            automatic = root / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
+            automatic = root / "Ecommerce - Documents" / "Program HUB" / "Flow Manager"
             automatic.mkdir(parents=True)
             legacy.mkdir(parents=True)
             (legacy / "stored_awbs.shared.json").write_text('{"123": {}}', encoding="utf-8")
@@ -293,7 +361,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             selected = Path(temp) / "Flow Manager" / "_shared_state"
             selected.mkdir(parents=True)
-            automatic = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager" / "_shared_state"
+            automatic = Path(temp) / "Ecommerce - Documents" / "Program HUB" / "Flow Manager"
             automatic.mkdir(parents=True)
             with patch.dict(os.environ, {"FLOW_SHARED_STATE_DIR": ""}, clear=False):
                 with patch.object(storage_manager.sys, "frozen", True, create=True):

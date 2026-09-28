@@ -78,23 +78,64 @@ def _shared_state_candidates() -> list[Path]:
     """Return the existing-company-workspace candidates for shared state.
 
     The executable is distributed separately from OneDrive.  Shared state is
-    therefore looked up only in the user's existing company OneDrive tree; no
-    project folder is created as part of discovery.  The canonical workspace
-    is the original Program HUB Flow Manager ``_shared_state`` folder.
+    therefore looked up only in the user's existing company sync tree; no
+    project folder is created as part of discovery.  Registered OneDrive roots
+    take priority over the bounded user-profile fallback.  The canonical
+    workspace is the existing Program HUB ``Flow Manager`` folder itself.
     """
     candidates: list[Path] = []
-    for root in _onedrive_roots():
-        for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
+    roots = [Path(root) for root in _onedrive_roots()]
+    documents_names = ("Ecommerce - Dokumentumok", "Ecommerce - Documents")
+    roots.extend(_profile_company_sync_roots(roots))
+    for root in roots:
+        for documents_name in documents_names:
             candidate = (
-                Path(root)
+                root
                 / documents_name
                 / "Program HUB"
                 / "Flow Manager"
-                / "_shared_state"
             )
             if candidate not in candidates:
                 candidates.append(candidate)
     return candidates
+
+
+def _profile_company_sync_roots(excluded_roots: list[Path]) -> list[Path]:
+    """Find non-OneDrive company sync roots directly below the user profile.
+
+    Some SharePoint libraries are pinned as e.g. ``USERPROFILE/HGL Group
+    Hungary Kft/Ecommerce - Dokumentumok`` instead of below a registered
+    OneDrive account root.  This bounded fallback checks only the profile and
+    its immediate child directories, and runs after the normal OneDrive roots.
+    """
+    profile = Path(os.environ.get("USERPROFILE") or Path.home())
+    known = {os.path.normcase(os.path.abspath(str(root))) for root in excluded_roots}
+    fallback_roots: list[Path] = []
+
+    possible_roots = [profile]
+    try:
+        profile_children = sorted(profile.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        profile_children = []
+    for child in profile_children:
+        try:
+            if child.is_dir():
+                possible_roots.append(child)
+        except OSError:
+            continue
+
+    for root in possible_roots:
+        normalized = os.path.normcase(os.path.abspath(str(root)))
+        if normalized in known:
+            continue
+        if not any(
+            (root / documents_name).is_dir()
+            for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents")
+        ):
+            continue
+        known.add(normalized)
+        fallback_roots.append(root)
+    return fallback_roots
 
 
 def _find_shared_state_folder() -> str:
@@ -111,20 +152,8 @@ def _find_shared_state_folder() -> str:
 
 
 def _ensure_shared_state_folder() -> str:
-    """Create only the canonical final folder under an existing Ecommerce root."""
-    existing = _find_shared_state_folder()
-    if existing:
-        return existing
-    for candidate in _shared_state_candidates():
-        documents_root = candidate.parents[2]
-        if not documents_root.is_dir():
-            continue
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            return str(candidate)
-        except OSError:
-            continue
-    return ""
+    """Return the existing canonical folder without creating directories."""
+    return _find_shared_state_folder()
 
 
 def _discover_shared_state_folder(wait_seconds: float = 0.0) -> str:
@@ -142,16 +171,17 @@ def _discover_shared_state_folder(wait_seconds: float = 0.0) -> str:
 def _is_legacy_shared_state_path(path: str) -> bool:
     """Identify older state locations that should migrate to the canonical path."""
     candidate = os.path.normcase(os.path.abspath(str(path)))
+    legacy_paths = [workspace / "_shared_state" for workspace in _shared_state_candidates()]
     for root in _onedrive_roots():
         for documents_name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents"):
-            legacy_paths = (
+            legacy_paths.extend((
                 Path(root) / documents_name / "Flow Manager" / "_shared_state",
                 Path(root) / documents_name / "Flow Manager",
-                Path(root) / documents_name / "Program HUB" / "Flow Manager",
-            )
-            if any(candidate == os.path.normcase(os.path.abspath(str(legacy))) for legacy in legacy_paths):
-                return True
-    return False
+            ))
+    return any(
+        candidate == os.path.normcase(os.path.abspath(str(legacy)))
+        for legacy in legacy_paths
+    )
 
 
 def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
@@ -165,7 +195,7 @@ def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
     for item in source.iterdir():
         if not item.is_file():
             continue
-        if not (item.name.endswith(".shared.json") or item.name.startswith("activity_")):
+        if not item.name.endswith(".shared.json"):
             continue
         destination = target / item.name
         if destination.exists():
@@ -300,7 +330,7 @@ def _ensure_shared_state_config(cfg: dict, cfg_path: Path) -> dict:
         if configured and os.path.normcase(os.path.abspath(configured)) != os.path.normcase(os.path.abspath(automatic)):
             if _is_legacy_shared_state_path(configured):
                 _migrate_legacy_shared_state(Path(configured), Path(automatic))
-            print(r"  [OK] A korabban kivalasztott shared_state utvonal felulirva a kanonikus Program HUB\Flow Manager\_shared_state mappaval.", flush=True)
+            print(r"  [OK] A korabban kivalasztott shared_state utvonal felulirva a kanonikus Program HUB\Flow Manager mappaval.", flush=True)
         if cfg.get("shared_state_dir"):
             cfg["shared_state_dir"] = ""
             with open(cfg_path, "w", encoding="utf-8") as f:

@@ -212,6 +212,15 @@ Ecommerce - Dokumentumok
 Ecommerce - Documents
 ```
 
+A shared state felderítése először a regisztrált OneDrive-gyökereket használja.
+Ha ezek egyikében sincs Ecommerce mappa, végső, korlátozott fallbackként az
+aktuális felhasználói profil közvetlen almappáiban keresi az
+`Ecommerce - Dokumentumok` / `Ecommerce - Documents` könyvtárat. Így a
+`USERPROFILE\HGL Group Hungary Kft\Ecommerce - Dokumentumok\Program HUB\Flow Manager`
+SharePoint-szinkron elrendezés is támogatott, teljes profil- vagy lemezszintű
+rekurzív keresés nélkül. A felismert, már létező `Flow Manager` mappa maga a
+shared state célja; a program nem hoz létre benne `_shared_state` almappát.
+
 ---
 
 ## Futtatás

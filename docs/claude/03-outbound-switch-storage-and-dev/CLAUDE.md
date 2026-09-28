@@ -85,11 +85,11 @@ Fájl: `storage_manager.py`
 Közös storage a meglévő OneDrive-mappában:
 
 ```text
-Ecommerce - Dokumentumok\Program HUB\Flow Manager\_shared_state\stored_awbs.shared.json
-Ecommerce - Dokumentumok\Program HUB\Flow Manager\_shared_state\stored_awbs.shared.lock
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.shared.json
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.shared.lock
 ```
 
-Angol OneDrive-mappanév esetén az `Ecommerce - Documents\Program HUB\Flow Manager\_shared_state`
+Angol OneDrive-mappanév esetén az `Ecommerce - Documents\Program HUB\Flow Manager`
 útvonal használható. A program ezt a közös mappát automatikusan keresi, és a
 korábban kiválasztott eltérő útvonalat induláskor felülírja.
 

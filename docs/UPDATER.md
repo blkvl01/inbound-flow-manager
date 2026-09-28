@@ -43,12 +43,16 @@ megkerülni.
 A közös munkafájlok továbbra is a OneDrive-on maradnak. Az Excel-források
 automatikusan az `Ecommerce - Dokumentumok` vagy `Ecommerce - Documents`
 mappából töltődnek. A közös állapot automatikus célja közvetlenül:
-`Ecommerce - Dokumentumok\Program HUB\Flow Manager\_shared_state` vagy
-`Ecommerce - Documents\Program HUB\Flow Manager\_shared_state`. A hiányzó végső
-`_shared_state` mappát a program meglévő Ecommerce-munkaterületen automatikusan
-létrehozza, és induláskor röviden újrapróbálja a OneDrive-feloldást. A közös `Betárolva`, megjegyzés, override,
-ULD-állapotfájlok közvetlenül ebbe a már meglévő munkamappába kerülnek; a
-program nem hoz létre hozzá saját OneDrive-almappát. A dashboard cache és a
+`Ecommerce - Dokumentumok\Program HUB\Flow Manager` vagy
+`Ecommerce - Documents\Program HUB\Flow Manager`. A program csak már létező
+`Flow Manager` mappát fogad el, nem hozza létre sem ezt, sem egy `_shared_state`
+almappát. Induláskor röviden újrapróbálja a OneDrive-feloldást. Ha egyik
+regisztrált OneDrive-gyökérben sincs Ecommerce mappa, végső tartalékként az
+aktuális felhasználói profil közvetlen almappáiban is keresi azt; ez támogatja
+például a `HGL Group Hungary Kft\Ecommerce - Dokumentumok` SharePoint-szinkron
+elrendezést. A közös `Betárolva`, megjegyzés, override,
+ULD-állapotfájlok közvetlenül ebbe a már meglévő `Flow Manager` munkamappába
+kerülnek. A dashboard cache és a
 fejlesztői aktivitásnapló gépenként helyben, a felhasználó helyi
 alkalmazásmappájában marad, így nem terheli az OneDrive-szinkronizálást. Ezt a helyet
 a `FLOW_SHARED_STATE_DIR` környezeti változó vagy a Beállításokban megadott

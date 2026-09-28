@@ -1,4 +1,18 @@
-# Inbound Flow Manager – v0.1.15
+# Inbound Flow Manager – v0.1.16
+
+A Program HUB állapotjelentése indításkor és ezután 30 percenként frissül.
+A korábbi megosztott munkatérből a migráció csak a közös üzleti állapot
+`*.shared.json` fájljait veszi át; a gép helyi tevékenységnaplóját nem másolja
+vissza a OneDrive-mappába. Az állapotjelentés hiánya esetén a HUB régebbi
+állapotot mutathat a következő frissítésig.
+
+A közös állapot célja ismét közvetlenül a már létező
+`Ecommerce - Dokumentumok\Program HUB\Flow Manager` mappa. A program nem hoz
+létre `_shared_state` almappát. Ha a céges SharePoint-könyvtár nem regisztrált
+OneDrive-gyökérként jelenik meg, a felhasználói profil közvetlen almappáiban is
+felismeri például a `HGL Group Hungary Kft\Ecommerce - Dokumentumok` elrendezést.
+
+## Előző javító kiadás: v0.1.15
 
 Az indításkori frissítéskeresés a legújabb publikus kiadás közvetlen
 `manifest.json` letöltési címét használja. Így a közös GitHub API-címen

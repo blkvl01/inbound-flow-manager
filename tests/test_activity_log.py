@@ -7,6 +7,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import activity_log
+from config import _migrate_legacy_shared_state
+
+
+def test_legacy_migration_keeps_activity_log_local(tmp_path):
+    source = tmp_path / "old"
+    target = tmp_path / "shared"
+    source.mkdir()
+    target.mkdir()
+    (source / "activity_2026-09-25.jsonl").write_text("{}\n", encoding="utf-8")
+    (source / "stored_awbs.shared.json").write_text("{}", encoding="utf-8")
+
+    _migrate_legacy_shared_state(source, target)
+
+    assert not (target / "activity_2026-09-25.jsonl").exists()
+    assert (target / "stored_awbs.shared.json").exists()
 
 
 class ActivityLogTests(unittest.TestCase):
