@@ -1,5 +1,5 @@
 """
-Background data cache — reads Excel files in a daemon thread so the
+Background data cache — reads Excel files in a disposable process so the
 UI stays responsive at all times.
 
 Refresh triggers:
@@ -8,9 +8,12 @@ Refresh triggers:
   3. Shared runtime-state watcher — updates lightweight UI state only
 """
 import logging
+import json
 import os
 import pickle
-import queue
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -30,18 +33,15 @@ import oracle_ecomm
 log = logging.getLogger(__name__)
 
 _REFRESH_SECONDS  = REFRESH_INTERVAL_MS / 1000
-_WATCH_INTERVAL_S = 3    # file-change check interval
-_STACK_STABLE_SECONDS = 6
+_WATCH_INTERVAL_S = 1    # lightweight shared-state metadata checks
+_STACK_STABLE_SECONDS = 1
 _CACHE_VERSION = 2
 _SUPPORTED_CACHE_VERSIONS = {1, 2}
 
-# A normal full source read (both Excels) takes ~30s. Beyond this budget the
-# source is stuck (OneDrive cloud-only hydration, Excel lock, network stall).
-# The scheduler abandons the wait, keeps the last good data, flags the stall and
-# retries soon — it must NEVER block indefinitely (24/7 TV must keep refreshing).
+# A full source read has a bounded process lifetime. Beyond this budget the
+# reader is stopped, the last good data stays visible and the scheduler retries.
 _READ_TIMEOUT_S = 150.0
-# While stalled, poll more often than the 10-min interval so we recover fast the
-# moment the source frees up (a late-finishing read is picked up immediately).
+# While stalled, retry more often than the normal 10-minute interval.
 _STALE_RETRY_S = 60.0
 
 _lock = threading.Lock()
@@ -60,6 +60,7 @@ _state = {
     "outbound_cards": [],
     "outbound_errors": {},
     "source_signature": None,
+    "source_changed_during_read": False,
     "issued_awbs": set(),
     "refreshing": False,
     "load_progress": 0,
@@ -122,7 +123,7 @@ def _source_signature() -> dict:
 
 
 def _uld_source_signature(source_signature: dict | None = None) -> dict:
-    sig = source_signature or _source_signature()
+    sig = _source_signature() if source_signature is None else source_signature
     return {
         "source": sig.get(ECOMM_FILE),
         "parser": ULD_DATA_PARSER_VERSION,
@@ -226,6 +227,9 @@ def _load_dashboard_cache() -> bool:
         _state["outbound_errors"] = payload.get("outbound_errors", {})
         _state["issued_awbs"] = payload.get("issued_awbs", set()) or set()
         _state["uld_data"] = payload.get("uld_data", []) or []
+        _state["uld_times_full"] = payload.get("uld_times_full", {}) or {}
+        _state["uld_returned"] = payload.get("uld_returned", []) or []
+        _state["uld_archive"] = payload.get("uld_archive", []) or []
         # A warm cache is not a fresh ULD read. Keep the cold-start gate closed
         # until the fast reader or the full source read completes.
         _state["uld_last_refresh"] = None
@@ -279,6 +283,9 @@ def _save_dashboard_cache(
     issued_awbs: set,
     uld_data: list[dict],
     loaded_at: datetime,
+    source_signature: dict | None = None,
+    uld_source_signature: dict | None = None,
+    uld_meta: dict | None = None,
 ):
     if errors.get("error") and not outbound_cards:
         return
@@ -290,8 +297,10 @@ def _save_dashboard_cache(
     payload = {
         "version": _CACHE_VERSION,
         "loaded_at": loaded_at.isoformat(),
-        "source_signature": _source_signature(),
-        "uld_source_signature": _uld_source_signature(),
+        # These versions belong to the captured workbook copies, never a stat
+        # performed after the source may already have changed again.
+        "source_signature": source_signature,
+        "uld_source_signature": uld_source_signature,
         "df": df,
         "errors": errors,
         "kpi": kpi,
@@ -299,6 +308,8 @@ def _save_dashboard_cache(
         "outbound_errors": outbound_errors,
         "issued_awbs": issued_awbs,
         "uld_data": uld_data,
+        **{key: (uld_meta or {}).get(key, {}) if key == "uld_times_full" else (uld_meta or {}).get(key, [])
+           for key in ("uld_times_full", "uld_returned", "uld_archive")},
     }
     for path in _cache_paths():
         _write_cache_file(path, payload)
@@ -426,6 +437,22 @@ def _get_mtime(path: str) -> float:
         return 0.0
 
 
+def _shared_json_is_complete(path: str) -> bool:
+    """Do not publish a OneDrive file while its replacement is incomplete."""
+    source = Path(path)
+    try:
+        before = source.stat()
+        with source.open("r", encoding="utf-8") as stream:
+            content = json.load(stream)
+        after = source.stat()
+        return (isinstance(content, dict)
+                and (before.st_mtime_ns, before.st_size) == (after.st_mtime_ns, after.st_size))
+    except FileNotFoundError:
+        return True  # a missing optional state file is the supported empty state
+    except (OSError, ValueError):
+        return False
+
+
 def _save_current_cache_snapshot():
     with _lock:
         df = _state.get("df")
@@ -436,7 +463,11 @@ def _save_current_cache_snapshot():
         issued_awbs = set(_state.get("issued_awbs") or set())
         uld_data = list(_state.get("uld_data") or [])
         loaded_at = _state.get("last_refresh") or datetime.now()
-    _save_dashboard_cache(df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, uld_data, loaded_at)
+        signature = _state.get("source_signature")
+        uld_signature = _state.get("uld_source_signature")
+        meta = {key: _state.get(key) for key in ("uld_times_full", "uld_returned", "uld_archive")}
+    _save_dashboard_cache(df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, uld_data,
+                          loaded_at, signature, uld_signature, meta)
 
 
 def refresh_uld_data(force: bool = False) -> bool:
@@ -468,6 +499,9 @@ def refresh_uld_data(force: bool = False) -> bool:
         if meta.get("error"):
             log.warning("Fast ULD refresh failed: %s", meta.get("error"))
             return False
+        captured_signature = meta.pop("_source_signature", None)
+        if captured_signature is not None:
+            source_sig = _uld_source_signature(captured_signature)
         with _lock:
             _state["uld_data"] = uld_data
             # Full am/expiry lookup including aged-out (>60h) ULDs — used by stack
@@ -489,6 +523,8 @@ def refresh_uld_data(force: bool = False) -> bool:
             _state["data_version"] += 1
         _save_current_cache_snapshot()
         log.info("Fast ULD refresh done: %d records", len(uld_data))
+        if source_sig != _uld_source_signature():
+            trigger_refresh()
         return True
     finally:
         with _lock:
@@ -519,19 +555,19 @@ def _file_watcher():
     while True:
         time.sleep(_WATCH_INTERVAL_S)
         current = _get_mtime(stored_path)
-        if current != last_stored_mtime:
+        if current != last_stored_mtime and _shared_json_is_complete(stored_path):
             last_stored_mtime = current
             log.info("Shared stored state changed: %s — syncing flags", os.path.basename(stored_path))
             update_stored_flags()
 
         current_notes = _get_mtime(notes_path)
-        if current_notes != last_notes_mtime:
+        if current_notes != last_notes_mtime and _shared_json_is_complete(notes_path):
             last_notes_mtime = current_notes
             log.info("Shared notes changed — bumping data_version")
             bump_data_version()
 
         current_overrides = _get_mtime(overrides_path)
-        if current_overrides != last_overrides_mtime:
+        if current_overrides != last_overrides_mtime and _shared_json_is_complete(overrides_path):
             last_overrides_mtime = current_overrides
             log.info("Shared overrides changed — reapplying")
             update_stored_flags()
@@ -542,7 +578,10 @@ def _file_watcher():
             if current_stacks_mtime != pending_stacks_mtime:
                 pending_stacks_mtime = current_stacks_mtime
                 pending_stacks_since = now
-            elif now - pending_stacks_since >= _STACK_STABLE_SECONDS:
+            elif (now - pending_stacks_since >= _STACK_STABLE_SECONDS
+                  and all(_shared_json_is_complete(str(path)) for path in (
+                      uld_stack_manager.get_stacks_path(), uld_stack_manager.get_renames_path(),
+                      uld_stack_manager.get_overrides_path()))):
                 last_stacks_mtime = current_stacks_mtime
                 pending_stacks_mtime = None
                 pending_stacks_since = 0.0
@@ -558,12 +597,6 @@ def _file_watcher():
         # Full source reads are intentionally limited to scheduled/manual refreshes.
 
 
-# Reader plumbing: the (potentially blocking) Excel read runs on a short-lived
-# helper thread and hands its result back through this queue, so the scheduler
-# thread can wait with a hard timeout and NEVER get stuck on a frozen source.
-_read_result_q: "queue.Queue" = queue.Queue()
-
-
 def _set_load_progress(percent: int, stage: str, detail: str = "") -> None:
     """Publish lightweight, thread-safe source-read progress for the overlay."""
     with _lock:
@@ -572,14 +605,82 @@ def _set_load_progress(percent: int, stage: str, detail: str = "") -> None:
         _state["load_detail"] = str(detail or "")
 
 
-def _reader_body():
-    started_at = datetime.now()
+def _terminate_reader(process: subprocess.Popen) -> None:
+    """Stop only our reader, including the one-file EXE's bootloader child."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # A frozen one-file executable has a bootloader parent and a Python
+        # child. Terminating just the parent would orphan the blocked reader.
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        process.terminate()
     try:
-        result = load_all_flow_data(progress_callback=_set_load_progress)
-        _read_result_q.put(("ok", {"result": result, "started_at": started_at}))
-    except Exception as exc:
-        log.error("Cache: source read raised: %s", exc, exc_info=True)
-        _read_result_q.put(("err", exc))
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _run_isolated_read(timeout: float | None = None, command_factory=None) -> dict:
+    """Bound the actual source work, not merely a thread waiting for it.
+
+    IPC is private and machine-local. No shared state or UI initialization is
+    performed by the child. A timeout always joins it before another starts.
+    """
+    timeout = _READ_TIMEOUT_S if timeout is None else timeout
+    signature = _source_signature()
+    with tempfile.TemporaryDirectory(prefix="flow-source-reader-") as directory:
+        destination = Path(directory)
+        (destination / "settings.json").write_text(json.dumps({
+            "ecomm_file": ECOMM_FILE, "pallets_file": PALLETS_FILE,
+        }), encoding="utf-8")
+        if command_factory is not None:
+            command = command_factory(destination)
+        elif getattr(sys, "frozen", False):
+            command = [sys.executable, "--flow-read-worker", directory]
+        else:
+            command = [sys.executable, "-u", str(Path(__file__).with_name("read_worker.py")), directory]
+        environment = os.environ.copy()
+        environment["FLOW_ECOMM_SOURCE"] = oracle_ecomm.get_source_mode()
+        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        started = time.monotonic()
+        process = None
+        with (destination / "reader.log").open("wb") as reader_log:
+            try:
+                process = subprocess.Popen(command, stdout=reader_log, stderr=reader_log,
+                                           env=environment, **options)
+                progress_signature = None
+                while process.poll() is None:
+                    if time.monotonic() - started >= timeout:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        progress_path = destination / "progress.json"
+                        current = progress_path.stat().st_mtime_ns
+                        if current != progress_signature:
+                            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                            _set_load_progress(*progress)
+                            progress_signature = current
+                    except (OSError, ValueError, TypeError):
+                        pass  # atomic progress publication may be between files
+                    time.sleep(min(0.1, max(0.01, timeout / 10)))
+                if process.returncode != 0:
+                    reader_log.flush()
+                    with (destination / "reader.log").open("rb") as stream:
+                        stream.seek(max(0, stream.seek(0, 2) - 3000))
+                        detail = stream.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Source reader exited ({process.returncode}): {detail}")
+                with (destination / "result.pkl").open("rb") as stream:
+                    payload = pickle.load(stream)
+                if not isinstance(payload, dict) or len(payload.get("result", ())) != 7:
+                    raise ValueError("Invalid source-reader result")
+                payload["source_signature"] = signature  # fallback for Oracle/older readers
+                return payload
+            finally:
+                if process is not None:
+                    _terminate_reader(process)
 
 
 def _has_good_data_locked() -> bool:
@@ -622,10 +723,17 @@ def _mark_read_stalled(reason: str, first: bool):
     log.warning("Cache: read stalled — keeping last good data (%s)", reason)
 
 
-def _apply_read_result(result, first: bool, read_started_at: datetime | None = None) -> bool:
+def _apply_read_result(result, first: bool, read_started_at: datetime | None = None,
+                       source_signature: dict | None = None) -> bool:
     """Apply a successful full read. Returns True on a real data update, or False
     on a hard read failure (last good data is kept)."""
     df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, uld_data = result
+    kpi = dict(kpi)
+    signature = kpi.pop("_source_signature", None)
+    if signature is None:
+        signature = source_signature if source_signature is not None else _source_signature()
+    uld_meta = kpi.pop("_uld_meta", None)
+    source_changed = signature != _source_signature()
 
     # Hard read failure (missing/stale/locked source) — keep last good data.
     # A merely empty-but-OK read (no active items) has NO hard_read_failure flag
@@ -636,6 +744,7 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         return False
 
     loaded_at = datetime.now()
+    cache_df = df
     with _lock:
         fast_uld_is_newer = bool(
             read_started_at
@@ -643,6 +752,10 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
             and _state["uld_last_refresh"] > read_started_at
         )
         effective_uld_data = list(_state.get("uld_data") or []) if fast_uld_is_newer else uld_data
+        effective_uld_signature = (_state.get("uld_source_signature") if fast_uld_is_newer
+                                   else _uld_source_signature(signature))
+        effective_uld_meta = ({key: _state.get(key) for key in ("uld_times_full", "uld_returned", "uld_archive")}
+                              if fast_uld_is_newer else uld_meta)
         if not fast_uld_is_newer:
             # The full read is also a valid fallback ULD snapshot.
             _state["uld_initial_load_complete"] = True
@@ -652,8 +765,6 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         for awb in stored_now & issued_awbs:
             storage_manager.mark_unstored(awb)
             log.info("Auto-unstored: %s (Kiadva in BUD-Pallets)", awb)
-    if (not errors.get("error")) and (not df.empty or bool(outbound_cards) or bool(effective_uld_data)):
-        _save_dashboard_cache(df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, effective_uld_data, loaded_at)
     if not df.empty:
         stored = storage_manager.get_stored_awbs()
         df = overrides_manager.apply_overrides_to_df(df)
@@ -672,6 +783,15 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         # A full Excel read is much slower than the ULD-only reader.  If the fast
         # reader completed after this full read started, its snapshot is newer and
         # must not be overwritten by the older in-flight result.
+        # Shared-state locks above can take seconds. A fast read may have
+        # completed since the first comparison; decide again at publication.
+        if (read_started_at and _state.get("uld_last_refresh")
+                and _state["uld_last_refresh"] > read_started_at):
+            fast_uld_is_newer = True
+            effective_uld_data = list(_state.get("uld_data") or [])
+            effective_uld_signature = _state.get("uld_source_signature")
+            effective_uld_meta = {key: _state.get(key) for key in (
+                "uld_times_full", "uld_returned", "uld_archive")}
         _state["df"]           = df if not df.empty else pd.DataFrame()
         _state["errors"]       = errors
         _state["kpi"]          = kpi
@@ -685,21 +805,29 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         _state["status"]       = "error" if errors.get("error") else "ready"
         _state["refresh_count"] += 1
         _state["data_version"] += 1
-        _state["source_signature"] = _source_signature()
+        _state["source_signature"] = signature
+        _state["source_changed_during_read"] = source_changed
         _state["issued_awbs"]  = issued_awbs
         _state["uld_data"]     = effective_uld_data
         if not fast_uld_is_newer:
             _state["uld_last_refresh"] = loaded_at
-            _state["uld_source_signature"] = _uld_source_signature(_state["source_signature"])
+            _state["uld_source_signature"] = effective_uld_signature
+            if uld_meta is not None:
+                for key in ("uld_times_full", "uld_returned", "uld_archive"):
+                    if key in uld_meta:
+                        _state[key] = uld_meta[key]
         _state["refreshing"]   = False
         _state["load_progress"] = 100
         _state["load_stage"] = "Betöltés kész"
         _state["load_detail"] = f"{len(df)} aktív tétel"
         _state["load_started_at"] = None
         row_count = len(_state["df"])
+    if (not errors.get("error")) and (not cache_df.empty or outbound_cards or effective_uld_data):
+        _save_dashboard_cache(cache_df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, effective_uld_data,
+                              loaded_at, signature, effective_uld_signature, effective_uld_meta)
     log.info("Cache: refresh done, %d active items", row_count)
     with _lock:
-        start_fast_uld = bool(_state.get("defer_fast_uld"))
+        start_fast_uld = bool(_state.get("defer_fast_uld")) and uld_meta is None
         _state["defer_fast_uld"] = False
     if start_fast_uld:
         # A cold Excel start already includes usable ULD rows in the full read.
@@ -707,39 +835,39 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         # same XLSB simultaneously on two threads and delaying the first view.
         threading.Thread(target=refresh_uld_data, kwargs={"force": True},
                          daemon=True, name="ULDDataFast").start()
+    if source_changed:
+        log.info("Source changed during read; captured version kept, scheduling fresh snapshot")
+        trigger_refresh()
     return True
 
 
 def _worker():
     first = True
-    reader = None
     while True:
-        # Dispatch a fresh read only when the previous one is no longer running,
-        # so a stuck read never accumulates duplicate reader threads.
-        if reader is None or not reader.is_alive():
+        # Previous attempts have exited before a fresh reader is dispatched.
+        with _lock:
+            _state["load_progress"] = 1
+            _state["load_stage"] = "Betöltés indítása"
+            _state["load_detail"] = "Adatforrások ellenőrzése"
+            _state["load_started_at"] = datetime.now()
+        if first:
+            print("  [*] E_COMM adatok betöltése...", flush=True)
+        else:
             with _lock:
-                _state["load_progress"] = 1
-                _state["load_stage"] = "Betöltés indítása"
-                _state["load_detail"] = "Adatforrások ellenőrzése"
-                _state["load_started_at"] = datetime.now()
-            if first:
-                print("  [*] E_COMM adatok betöltése (~30 mp)...", flush=True)
-            else:
-                with _lock:
-                    _state["refreshing"] = True
-                    _state["data_version"] += 1   # poll picks up the refreshing flag
-            log.info("Cache: starting data refresh")
-            reader = threading.Thread(target=_reader_body, daemon=True, name="DataRead")
-            reader.start()
-
-        # Bounded wait — the scheduler must never block forever. A late result
-        # from a previously-stuck reader is picked up here the instant it lands.
+                _state["refreshing"] = True
+                _state["data_version"] += 1
+        log.info("Cache: starting data refresh")
+        # A failed/timed-out process is joined before the next attempt.
         try:
-            status, payload = _read_result_q.get(timeout=_READ_TIMEOUT_S)
+            payload = _run_isolated_read()
+            status = "ok"
             timed_out = False
-        except queue.Empty:
+        except subprocess.TimeoutExpired:
             status, payload = None, None
             timed_out = True
+        except Exception as exc:
+            log.error("Cache: source reader failed: %s", exc, exc_info=True)
+            status, payload, timed_out = "err", exc, False
 
         if timed_out:
             source_label = "Oracle" if oracle_ecomm.get_source_mode() == "oracle" else "OneDrive/Excel"
@@ -750,7 +878,8 @@ def _worker():
             wait_s = _STALE_RETRY_S
         elif status == "ok":
             if isinstance(payload, dict) and "result" in payload:
-                updated = _apply_read_result(payload["result"], first, payload.get("started_at"))
+                updated = _apply_read_result(payload["result"], first, payload.get("started_at"),
+                                             payload.get("source_signature"))
             else:  # backward-compatible with an already queued pre-upgrade result
                 updated = _apply_read_result(payload, first)
             if first:

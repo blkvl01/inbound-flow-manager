@@ -78,6 +78,26 @@
   var _tableSwap = false;         // animate the table content on the next renderTable
   var sectionObserver = null;
   var sectionVisible = false;
+  var trendHostIds = ["kpi-trend-breakdown", "kpi-trend-view", "kpi-trend-range", "kpi-trend-filter", "kpi-trend-chart", "kpi-trend-table"];
+  function activeTrend() { return !window.__kpiActiveSubview || window.__kpiActiveSubview() === "report"; }
+  window.__unmountKpiTrend = function () {
+    if (sectionObserver) sectionObserver.disconnect();
+    sectionObserver = null;
+    sectionVisible = false;
+    if (removeTimer) clearTimeout(removeTimer);
+    removeTimer = null;
+    pendingRemoval = false;
+    var section = document.getElementById("kpi-trend-section");
+    if (section) {
+      clearTimeout(section.__kpiTrendOpeningTimer);
+      section.classList.remove("is-opening", "kpi-reveal-pending");
+    }
+    var chart = document.getElementById("kpi-trend-chart");
+    if (chart) chart.__kpiTrendDrawGen = (chart.__kpiTrendDrawGen || 0) + 1;
+    lastSig = lastDataContentSig = "";
+    pendingRevealToken = revealedToken = null;
+    if (window.__clearKpiHosts) window.__clearKpiHosts(trendHostIds);
+  };
   var MORPH_MS = 560;
   var trendClipSeq = 0;
   // The Y-scale morph rides on transform-box:view-box; if the renderer lacks it we
@@ -1236,6 +1256,7 @@
 
   // Play the deferred opening reveal the moment the section is at least half visible.
   function setupSectionObserver() {
+    if (!activeTrend()) return;
     if (sectionObserver || typeof IntersectionObserver === "undefined") return;
     var section = document.getElementById("kpi-trend-section");
     if (!section) return;
@@ -1264,7 +1285,7 @@
   // draw-on plays on a plain page switch — not only after a data refresh.
   window.addEventListener("kpi-view-entered", function () {
     setTimeout(function () {
-      if (!data) return;
+      if (!data || !activeTrend()) return;
       revealedToken = null;
       pendingRevealToken = null;
       var section = document.getElementById("kpi-trend-section");
@@ -1386,6 +1407,7 @@
     }
   }
   function renderAll(swap, effect, reason) {
+    if (!activeTrend()) return;
     // Any full rebuild supersedes an in-flight series-retract (poll, mode swap…).
     if (removeTimer) { clearTimeout(removeTimer); removeTimer = null; }
     pendingRemoval = false;
@@ -1405,6 +1427,7 @@
     _tableSwap = reason !== "data";   // user-driven change → animate the table content
     renderChart(payload, effect || null, reason);
     renderTable(payload);
+    if (window.__markKpiHosts) window.__markKpiHosts(trendHostIds);
   }
 
   function signature(trend) {
@@ -1681,6 +1704,7 @@
   });
 
   window.__renderKpiTrend = function (trend, updated) {
+    if (!activeTrend()) return;
     setupSectionObserver();
     if (!trend || !trend.day) {
       if (!data) { renderControls(); renderTitle(); renderChart({ cols: [], rows: [] }, null, "data"); }

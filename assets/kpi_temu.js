@@ -28,6 +28,19 @@
 
   var lastRenderSig = "", lastCountSig = "";
   var revealObserver = null, revealed = false, revealArmed = false, openingTimer = 0, lastOpenTs = 0;
+  var temuHostIds = ["kpi-temu-dates", "kpi-temu-compare", "kpi-temu-view", "kpi-temu-filter", "kpi-temu-range", "kpi-temu-summary", "kpi-temu-chart", "kpi-temu-detail", "kpi-temu-legend", "kpi-temu-suspects", "kpi-temu-table"];
+  function activeTemu() { return !window.__kpiActiveSubview || window.__kpiActiveSubview() === "report"; }
+  window.__unmountKpiTemu = function () {
+    if (revealObserver) revealObserver.disconnect();
+    revealObserver = null;
+    clearTimeout(openingTimer);
+    openingTimer = 0;
+    revealArmed = false;
+    lastRenderSig = lastCountSig = "";
+    var section = document.getElementById("kpi-temu-section");
+    if (section) section.classList.remove("is-opening", "kpi-reveal-pending", "is-stage-morph", "is-stage-rise");
+    if (window.__clearKpiHosts) window.__clearKpiHosts(temuHostIds);
+  };
   var lastExport = null, lastFlagExport = null;
   var dragging = false, dragStart = -1, dragEnd = -1, dragMoved = false;
 
@@ -951,7 +964,7 @@
     return !!(section && section.classList.contains("is-kpi-snap-active"));
   }
   function revealSection(section) {
-    if (!section || revealed) return;
+    if (!section || revealed || !activeTemu()) return;
     revealed = true; revealArmed = false; lastOpenTs = Date.now();
     section.classList.remove("kpi-reveal-pending"); section.classList.add("is-revealed", "is-opening");
     if (openingTimer) clearTimeout(openingTimer);
@@ -973,6 +986,7 @@
     return revealObserver;
   }
   function armReveal() {
+    if (!activeTemu()) return;
     var section = document.getElementById("kpi-temu-section");
     if (!section) return;
     if (reduceMotion() || revealed) { revealed = true; section.classList.add("is-revealed"); playFill(section, false); runCounts(section, false); return; }
@@ -983,6 +997,7 @@
   }
 
   function render(animateIfVisible) {
+    if (!activeTemu()) return;
     var section = document.getElementById("kpi-temu-section");
     var chartHost = document.getElementById("kpi-temu-chart");
     var subEl = document.getElementById("kpi-temu-subtitle");
@@ -1214,6 +1229,7 @@
     ].join("/");
   }
   window.__renderKpiTemu = function (data) {
+    if (!activeTemu()) return;
     payload = data || {};
     var validScopes = ["ALL"].concat(countries()).concat(lmps());
     if (scope !== "ALL" && validScopes.indexOf(scope) < 0) { scope = "ALL"; focusFrom = focusTo = null; selectedKey = null; }
@@ -1222,6 +1238,7 @@
     if (sig === lastRenderSig && document.querySelector(".kpi-temu-col")) { armReveal(); return; }
     lastRenderSig = sig; lastCountSig = "";
     render(revealed);
+    if (window.__markKpiHosts) window.__markKpiHosts(temuHostIds);
   };
   // Play the staggered column opening exactly ONCE — the first time the user
   // lands on this panel — then never again. `revealed` is the latch and is NEVER
@@ -1235,6 +1252,7 @@
   //     start only after a full scroll to the bottom and back.
   //   • kpi-segment-settled — arriving at TEMU by scrolling in from another panel.
   function openOnce() {
+    if (!activeTemu()) return;
     var section = document.getElementById("kpi-temu-section");
     if (!section || revealed || !document.querySelector(".kpi-temu-col")) return;
     if (!elementInView(section)) return;   // hidden subpage / not on screen yet

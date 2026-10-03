@@ -137,7 +137,9 @@
       lastMs = 0;
     }
     if (ctl) {
+      clearTimeout(ctl.__kpiSubLandingTimer);
       ctl.classList.remove("ks-physics");
+      ctl.classList.remove("is-landing");
       clearVars();
     }
     window.removeEventListener("resize", onResize);
@@ -152,6 +154,7 @@
   }
 
   function init() {
+    if (document.hidden || !document.body || !document.body.classList.contains("view-kpi-mode")) { detach(); return; }
     var el = document.querySelector(".kpi-subview-switch");
     if (!el) return;
     if (ctl === el && attached) return;
@@ -174,6 +177,19 @@
   function boot() {
     if (document.body && document.body.classList.contains("view-kpi-mode")) init();
   }
+  function syncLifecycle() {
+    if (document.hidden || !document.body.classList.contains("view-kpi-mode")) detach();
+    else init();
+  }
+  document.addEventListener("visibilitychange", syncLifecycle);
+  function observeLifecycle() {
+    if (!document.body || !window.MutationObserver) return;
+    var wasActive = document.body.classList.contains("view-kpi-mode");
+    new MutationObserver(function () {
+      var active = document.body.classList.contains("view-kpi-mode");
+      if (active !== wasActive) { wasActive = active; syncLifecycle(); }
+    }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  }
 
   window.addEventListener("kpi-view-entered", function () {
     attached = false;
@@ -184,8 +200,9 @@
   });
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { setTimeout(boot, 120); });
+    document.addEventListener("DOMContentLoaded", function () { observeLifecycle(); setTimeout(boot, 120); });
   } else {
+    observeLifecycle();
     setTimeout(boot, 120);
   }
 })();

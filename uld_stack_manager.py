@@ -545,11 +545,42 @@ def get_stacks_cached() -> list[dict]:
         with _READ_CACHE_LOCK:
             if _read_cache_sig == sig and _read_cache_value is not None:
                 return _read_cache_value
-    value = get_stacks()
-    if sig is not None:
+    # OneDrive can expose a short-lived incomplete replacement; retain the last
+    # complete parse and retry next poll. Legacy identity repair remains under
+    # the authoritative lock, otherwise a generated display ID would differ
+    # from the ID used by a later mutation.
+    try:
+        with get_stacks_path().open("r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        if not isinstance(payload, dict) or not isinstance(payload.get("stacks"), list):
+            raise ValueError("Incomplete ULD stack payload")
+        after = get_stacks_path().stat()
+        if sig != (after.st_mtime_ns, after.st_size):
+            raise ValueError("ULD stack changed during display read")
+        value, changed = _normalize_stacks(payload["stacks"])
+        if changed:
+            _acquire_lock()
+            try:
+                before = get_stacks_path().stat()
+                with get_stacks_path().open("r", encoding="utf-8") as stream:
+                    payload = json.load(stream)
+                after = get_stacks_path().stat()
+                if ((before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size)
+                        or not isinstance(payload, dict) or not isinstance(payload.get("stacks"), list)):
+                    raise ValueError("Incomplete ULD stack replacement")
+                value, changed = _normalize_stacks(payload["stacks"])
+                if changed:
+                    _write_unlocked(value)
+                after = get_stacks_path().stat()
+                sig = (after.st_mtime_ns, after.st_size)
+            finally:
+                _release_lock()
+    except (OSError, ValueError, TypeError):
         with _READ_CACHE_LOCK:
-            _read_cache_sig = sig
-            _read_cache_value = value
+            return _read_cache_value if _read_cache_value is not None else []
+    with _READ_CACHE_LOCK:
+        _read_cache_sig = sig
+        _read_cache_value = value
     return value
 
 

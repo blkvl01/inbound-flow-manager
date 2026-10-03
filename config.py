@@ -65,13 +65,26 @@ def _registered_onedrive_roots() -> list[str]:
 
 
 def _find_onedrive_folder() -> str:
-    candidates = ("Ecommerce - Dokumentumok", "Ecommerce - Documents")
-    for root in _onedrive_roots():
-        for candidate in candidates:
-            path = os.path.join(root, candidate)
-            if os.path.isdir(path):
-                return path
-    return os.path.join(_onedrive_roots()[0], candidates[0])
+    candidates = _excel_source_folders()
+    return str(next((path for path in candidates if path.is_dir()), candidates[0]))
+
+
+def _excel_source_folders() -> list[Path]:
+    """Registered/standard OneDrive first, bounded company-profile fallback last."""
+    roots = [Path(root) for root in _onedrive_roots()]
+    roots.extend(_profile_company_sync_roots(roots))
+    return [root / name for root in roots
+            for name in ("Ecommerce - Dokumentumok", "Ecommerce - Documents")]
+
+
+def _find_excel_source(filename: str) -> str:
+    # Resolve each workbook independently: an empty earlier library must not
+    # conceal the original workbook in another supported sync layout.
+    for folder in _excel_source_folders():
+        candidate = folder / filename
+        if candidate.is_file():
+            return str(candidate)
+    return str(Path(_find_onedrive_folder()) / filename)
 
 
 def _shared_state_candidates() -> list[Path]:
@@ -207,8 +220,8 @@ def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
 
 
 _DEFAULT = {
-    "ecomm_file":               rf"{_find_onedrive_folder()}\E_COMM nyomonkövetés_24.xlsb",
-    "pallets_file":             rf"{_find_onedrive_folder()}\BUD-Pallets.xlsm",
+    "ecomm_file":               _find_excel_source("E_COMM nyomonkövetés_24.xlsb"),
+    "pallets_file":             _find_excel_source("BUD-Pallets.xlsm"),
     "shared_state_dir":          "",
     "refresh_interval_minutes": 10,
     "port":                     8501,
@@ -359,6 +372,15 @@ def _ensure_shared_state_config(cfg: dict, cfg_path: Path) -> dict:
 
 
 def _load() -> dict:
+    # The disposable reader receives exact parent source paths and never opens
+    # a file picker or rewrites the user's settings/shared-folder selection.
+    worker_settings = os.environ.get("FLOW_READ_WORKER_SETTINGS")
+    if worker_settings:
+        settings = json.loads(Path(worker_settings).read_text(encoding="utf-8"))
+        cfg = read_config_snapshot()
+        cfg["ecomm_file"] = settings["ecomm_file"]
+        cfg["pallets_file"] = settings["pallets_file"]
+        return cfg
     cfg_path = get_config_path()
     if cfg_path.exists():
         with open(cfg_path, "r", encoding="utf-8") as f:

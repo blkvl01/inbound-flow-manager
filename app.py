@@ -1,5 +1,10 @@
 import sys
 
+# Reader subprocess bootstrap must avoid the web application and shared-state setup.
+if __name__ == "__main__" and "--flow-read-worker" in sys.argv:
+    from read_worker import run_worker
+    raise SystemExit(run_worker(sys.argv[sys.argv.index("--flow-read-worker") + 1]))
+
 # The one-file updater helper must be reachable before Dash/Pandas imports.
 if __name__ == "__main__" and "--flow-manager-update-helper" in sys.argv:
     import updater as _updater_helper
@@ -78,7 +83,6 @@ from priority_engine import (
     apply_priorities,
 )
 from version import APP_VERSION
-import hub_presence
 
 # This release target is the Excel/OneDrive edition.  The existing source tree
 # still contains the separate Oracle trial path, but the distributed EXE must
@@ -203,6 +207,9 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 server = app.server
+
+from http_performance import install_http_performance
+install_http_performance(server)
 
 
 @server.before_request
@@ -856,9 +863,9 @@ def _asset_cache_headers(response):
         "kpi_bands.js",
         "tv_mode.js",
     }:
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+        response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
+        response.headers.pop("Pragma", None)
+        response.headers.pop("Expires", None)
     return response
 
 
@@ -1816,6 +1823,32 @@ def _uld_stack_success(extra: dict | None = None):
     return jsonify(payload)
 
 
+def _active_excel_source(kind):
+    return ECOMM_FILE if kind == "ecomm" else flow_config.PALLETS_FILE
+
+
+@server.route("/api/sources/open", methods=["POST"])
+def api_source_open():
+    from flask import jsonify
+    import source_open
+    if not source_open.is_local_request(request):
+        return jsonify(ok=False, error="A megnyitás csak a helyi Flow Managerből kérhető."), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("kind"), str) or data["kind"] not in {"ecomm", "pallets"}:
+        return jsonify(ok=False, error="Ismeretlen forrás."), 400
+    test_mode = data.get("test_mode", False)
+    if not isinstance(test_mode, bool):
+        return jsonify(ok=False, error="Érvénytelen tesztmód."), 400
+    if oracle_ecomm.get_source_mode() == "oracle":
+        return jsonify(ok=False, error="Az aktív adatforrás Oracle."), 409
+    kind = data["kind"]
+    ok, message = source_open.opener.open(
+        kind, _active_excel_source(kind), data_cache.trigger_refresh,
+        lambda: _active_excel_source(kind),
+    )
+    return jsonify(ok=ok, **({"message": message} if ok else {"error": message})), (200 if ok else 400)
+
+
 def _settings_payload() -> dict:
     cfg = flow_config.read_config_snapshot()
     configured_shared_state = str(cfg.get("shared_state_dir") or "").strip()
@@ -2310,7 +2343,25 @@ def _kpi_bec_copy_text(kpi: dict) -> str:
     )
 
 
-def _ecomm_source_badge():
+def _excel_source_controls(badge, kind, stale, missing=False):
+    children = [badge]
+    if missing or stale:
+        children.append(html.Button(
+            "Fájl kiválasztása" if missing else "Megnyitás Excelben",
+            className="source-open-btn", type="button",
+            title="Fájl kiválasztása" if missing else "Megnyitás Excelben",
+            **{"data-source-kind": kind, "data-source-action": "settings" if missing else "open"},
+        ))
+    children.append(html.Span(className="source-open-feedback", role="status",
+                              **{"aria-live": "polite", "data-source-feedback": kind}))
+    return html.Span(children, className="source-status-group")
+
+
+def _source_test_status(kind):
+    return _ecomm_source_badge(force_buttons=True) if kind == "ecomm" else _pallets_source_badge(force_buttons=True)
+
+
+def _ecomm_source_badge(force_buttons=False):
     mode = oracle_ecomm.get_source_mode()
     if mode == "oracle":
         state = data_cache.get_state()
@@ -2337,7 +2388,7 @@ def _ecomm_source_badge():
     try:
         mtime = datetime.fromtimestamp(os.path.getmtime(ECOMM_FILE))
     except OSError:
-        return html.Span("ECOMM: nem található", className="source-age source-stale")
+        return _excel_source_controls(html.Span("ECOMM: nem található", className="source-age source-stale"), "ecomm", True, missing=True)
 
     age_seconds = max(0.0, (datetime.now() - mtime).total_seconds())
     age_minutes = age_seconds / 60.0
@@ -2348,16 +2399,16 @@ def _ecomm_source_badge():
     else:
         age_text = f"{age_minutes / 60:.1f} oraja"
 
-    stale = age_minutes > ECOMM_STALE_AFTER_MINUTES
+    stale = age_minutes > ECOMM_STALE_AFTER_MINUTES or bool(data_cache.get_state().get("read_stalled"))
     shadow_suffix = " + Oracle shadow" if mode == "shadow" else ""
-    return html.Span(
+    return _excel_source_controls(html.Span(
         f"ECOMM Excel{shadow_suffix}: {mtime.strftime('%H:%M:%S')} ({age_text})",
         className=f"source-age {'source-stale' if stale else 'source-fresh'}",
         title=f"E_COMM utolsó módosítás: {mtime.strftime('%Y-%m-%d %H:%M:%S')}",
-    )
+    ), "ecomm", stale or force_buttons)
 
 
-def _pallets_source_badge():
+def _pallets_source_badge(force_buttons=False):
     """Same freshness indicator as ECOMM, but for the BUD-Pallets workbook — so a
     stalled BUD-Pallets save is just as visible as a stalled E_COMM one."""
     if oracle_ecomm.get_source_mode() == "oracle":
@@ -2385,7 +2436,7 @@ def _pallets_source_badge():
     try:
         mtime = datetime.fromtimestamp(os.path.getmtime(flow_config.PALLETS_FILE))
     except OSError:
-        return html.Span("PALLETS: nem található", className="source-age source-stale")
+        return _excel_source_controls(html.Span("PALLETS: nem található", className="source-age source-stale"), "pallets", True, missing=True)
 
     age_seconds = max(0.0, (datetime.now() - mtime).total_seconds())
     age_minutes = age_seconds / 60.0
@@ -2396,12 +2447,12 @@ def _pallets_source_badge():
     else:
         age_text = f"{age_minutes / 60:.1f} oraja"
 
-    stale = age_minutes > ECOMM_STALE_AFTER_MINUTES
-    return html.Span(
+    stale = age_minutes > ECOMM_STALE_AFTER_MINUTES or bool(data_cache.get_state().get("read_stalled"))
+    return _excel_source_controls(html.Span(
         f"PALLETS: {mtime.strftime('%H:%M:%S')} ({age_text})",
         className=f"source-age {'source-stale' if stale else 'source-fresh'}",
         title=f"BUD-Pallets utolsó módosítás: {mtime.strftime('%Y-%m-%d %H:%M:%S')}",
-    )
+    ), "pallets", stale or force_buttons)
 
 
 def _sync_stall_badge():
@@ -5038,6 +5089,44 @@ def _cards_grid(cards, class_name: str = "cards-grid", empty_text: str = "Nincs 
     ])
 
 
+_CARDS_PAGE_SIZE = 12
+
+
+def _page_card_entries(entries, active_filter="all", plate_focus="", page=1):
+    """Filter the complete ordered dataset before creating any card components."""
+    focus = _plate_key(plate_focus)
+    selected = []
+    for row, stored, can_unstore in entries:
+        if (active_filter or "all") not in _inbound_filter_tokens(row, stored).split():
+            continue
+        if focus:
+            key = _truck_turn_key(row.get("rendszam"), row.get("am_time"))
+            if (_plate_key(key) != focus if "|" in focus else _plate_key(row.get("rendszam")) != focus):
+                continue
+        selected.append((row, stored, can_unstore))
+    pages = max(1, (len(selected) + _CARDS_PAGE_SIZE - 1) // _CARDS_PAGE_SIZE)
+    current = max(1, min(_safe_int(page, 1), pages))
+    start = (current - 1) * _CARDS_PAGE_SIZE
+    return selected[start:start + _CARDS_PAGE_SIZE], len(selected), current
+
+
+def _paged_cards_grid(cards, total, current, class_name="cards-grid", empty_text="Nincs tétel ebben a kategóriában."):
+    if not cards:
+        return html.Div(empty_text, className="empty-state")
+    pages = max(1, (total + _CARDS_PAGE_SIZE - 1) // _CARDS_PAGE_SIZE)
+    def pager(position):
+        return html.Nav(className="cards-pager", **{"aria-label": "Tételek lapozása", "data-current-page": current}, children=[
+            html.Button("Előző", className="cards-page-btn", disabled=current == 1, n_clicks=0,
+                        id={"type": "cards-page-btn", "direction": "prev", "position": position}),
+            html.Span(f"{current} / {pages} oldal · {total} tétel", className="cards-page-info", role="status"),
+            html.Button("Következő", className="cards-page-btn", disabled=current == pages, n_clicks=0,
+                        id={"type": "cards-page-btn", "direction": "next", "position": position}),
+        ])
+    return html.Div(children=[pager("top") if pages > 1 else None,
+                              _cards_grid(cards, class_name, empty_text),
+                              pager("bottom") if pages > 1 else None])
+
+
 # (btn_id, filter_key, label, color, count_id)
 _STAT_DEFS = [
     ("stat-btn-all",      "all",       "Aktív tétel",       None,      "scount-all"),
@@ -7204,6 +7293,11 @@ app.layout = html.Div(id="layout-root", children=[
     dcc.Store(id="flow-mode-applied"),
     dcc.Store(id="active-filter", data="all"),
     dcc.Store(id="active-filter-applied"),
+    dcc.Store(id="cards-page-store", data=1),
+    dcc.Store(id="cards-plate-focus", data=""),
+    dcc.Store(id="uld-mounted", data=False),
+    dcc.Store(id="loading-status-store"),
+    dcc.Store(id="loading-status-applied"),
     dcc.Store(id="priority-test-mode", data=False),
     dcc.Store(id="loader-color-applied"),
     dcc.Store(id="overlay-state", data="first"),
@@ -7501,7 +7595,8 @@ app.layout = html.Div(id="layout-root", children=[
                     html.Div(id="tv-page-dots", className="tv-page-dots"),
                 ]),
             ]),
-            ]),  # /tv-page-ops
+
+            ]),  # /tv-page-ops
 
             # ══ OLDAL 2 — MŰSZAK RIPORT (outbound-vezérelt, minimális inbound) ══
             html.Div(id="tv-page-report", className="tv-page tv-page-report", children=[
@@ -7558,7 +7653,8 @@ app.layout = html.Div(id="layout-root", children=[
             ]),  # /tv-page-report
 
         ]),
-        ]),  # /tv-stage
+
+        ]),  # /tv-stage
 
         # Refresh countdown arc (SVG injected by tv_mode.js on enter)
         html.Div(id="tv-refresh-fab", className="tv-refresh-fab"),
@@ -8366,6 +8462,7 @@ def set_uld_view(_active_clicks, _dispatched_clicks):
     Output("uld-pagination-top", "children"),
     Output("uld-pagination",    "children"),
     Output("uld-dispatched-sig", "data"),
+    Output("uld-mounted", "data"),
     Input("poll",                     "n_intervals"),
     Input("uld-filter-store",         "data"),
     Input("uld-trigger-store",        "data"),
@@ -8376,10 +8473,26 @@ def set_uld_view(_active_clicks, _dispatched_clicks):
     Input("uld-gha-filter-store",     "data"),
     Input("uld-page-store",           "data"),
     Input("uld-list-dirty-store",     "data"),
+    Input("view-mode",                "data"),
     State("data-version",             "data"),
     State("uld-dispatched-sig",       "data"),
+    State("uld-mounted",              "data"),
     prevent_initial_call=False,
 )
+def render_uld_view_callback(_n, status_filter, _trigger, flow_mode, uld_view,
+                             search_text, prefix_filter, gha_filter, page, _list_dirty,
+                             view_mode, current_data_version, current_dispatched_sig, mounted):
+    if flow_mode != "uld" or (view_mode or "ops") != "ops":
+        if mounted:
+            return [], [], [], [], None, None, no_update, False
+        return (no_update,) * 8
+    result = render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
+                             search_text, prefix_filter, gha_filter, page, _list_dirty,
+                             current_data_version if mounted else None,
+                             current_dispatched_sig if mounted else None)
+    return (*result, True if not mounted else no_update)
+
+
 def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
                     search_text, prefix_filter, gha_filter, page, _list_dirty,
                     current_data_version, current_dispatched_sig):
@@ -8587,21 +8700,12 @@ app.clientside_callback(
         if (overlay) {
             overlay.className = 'loading-overlay loading-refresh';
             overlay.style.display = 'flex';
-            overlay.innerHTML =
-                '<div class="l-topbar"><div class="l-topbar-fill"></div></div>' +
-                '<div class="l-pill"><span class="l-spin"></span><span class="l-pill-text">Adatok újratöltése</span></div>';
         }
+        window.dash_clientside.set_props('loading-poll', {disabled: false});
         if (btn) {
             btn.disabled = true;
             btn.style.opacity = '0.55';
         }
-        setTimeout(function() {
-            if (btn) {
-                btn.disabled = false;
-                btn.style.opacity = '';
-                btn.textContent = '⟳ Frissítés';
-            }
-        }, 3000);
         return 'Indítás...';
     }
     """,
@@ -8750,16 +8854,32 @@ app.clientside_callback(
 )
 
 
-@app.callback(
-    Output("overlay",             "className"),
-    Output("overlay",             "style"),
-    Output("overlay-state",       "data"),
-    Input("loading-poll",         "n_intervals"),
-    Input("kézi-refresh-store", "data"),
-    Input("store-action",         "data"),
-    Input("priority-test-mode",   "data"),
-    State("overlay-state",        "data"),
+app.clientside_callback(
+    """
+    function(clicks, filter, flow, focus, test, current) {
+        var cb = dash_clientside.callback_context || {};
+        var trigger = cb.triggered_id;
+        if (typeof trigger === 'string' && trigger.charAt(0) === '{') {
+            try { trigger = JSON.parse(trigger); } catch (e) {}
+        }
+        if (!trigger || typeof trigger !== 'object') return 1;
+        var prop = cb.triggered && cb.triggered[0];
+        if (!prop || !(Array.isArray(prop.value) ? prop.value.some(function(n) { return n > 0; }) : prop.value > 0)) {
+            return window.dash_clientside.no_update;
+        }
+        var pager = document.querySelector('.cards-pager[data-current-page]');
+        var page = pager ? parseInt(pager.dataset.currentPage, 10) : (current || 1);
+        return Math.max(1, page + (trigger.direction === 'next' ? 1 : -1));
+    }
+    """,
+    Output("cards-page-store", "data"),
+    Input({"type": "cards-page-btn", "direction": ALL, "position": ALL}, "n_clicks"),
+    Input("active-filter", "data"), Input("flow-mode", "data"),
+    Input("cards-plate-focus", "data"), Input("priority-test-mode", "data"),
+    State("cards-page-store", "data"), prevent_initial_call=True,
 )
+
+
 def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
     state = data_cache.get_state()
     status       = state["status"]
@@ -8802,14 +8922,6 @@ def update_overlay(_poll, _kézi, _store, priority_test_mode, current_ov_state):
     return new_cls, new_style, new_state
 
 
-@app.callback(
-    Output("loading-stage", "children"),
-    Output("loading-detail", "children"),
-    Output("loading-percent", "children"),
-    Output("loading-fill", "style"),
-    Output("loading-track", "aria-valuenow"),
-    Input("loading-poll", "n_intervals"),
-)
 def update_loading_progress(_poll):
     state = data_cache.get_state()
     update = updater.get_status()
@@ -8828,6 +8940,50 @@ def update_loading_progress(_poll):
 
 
 @app.callback(
+    Output("overlay", "className"), Output("overlay", "style"),
+    Output("overlay-state", "data"),
+    Output("loading-stage", "children"), Output("loading-detail", "children"),
+    Output("loading-percent", "children"), Output("loading-fill", "style"),
+    Output("loading-track", "aria-valuenow"),
+    Output("loading-poll", "disabled"), Output("refresh-btn", "disabled"),
+    Output("loading-status-store", "data"),
+    Input("loading-poll", "n_intervals"), Input("poll", "n_intervals"),
+    Input("kézi-refresh-store", "data"), Input("priority-test-mode", "data"),
+    State("overlay-state", "data"), State("loading-status-store", "data"),
+)
+def update_loading_state(_fast, _slow, manual, test_mode, overlay_state, previous):
+    state = data_cache.get_state()
+    phase = updater.get_status().get("phase")
+    source_busy = bool(state.get("refreshing") or state.get("status") == "loading")
+    fast = source_busy or phase in {"checking", "downloading", "verifying", "installing"}
+    overlay = update_overlay(_fast, manual, None, test_mode, overlay_state)
+    progress = update_loading_progress(_fast)
+    signature = {
+        "source_busy": source_busy, "fast": fast, "manual": manual,
+        "stage": progress[0], "detail": progress[1], "percent": progress[2],
+        "overlay": overlay[2] if overlay[2] is not no_update else overlay_state,
+    }
+    if signature == previous:
+        # Manual feedback is acknowledged through the changing manual counter;
+        # ordinary idle polls need no DOM/property mutations.
+        return (no_update,) * 11
+    return (*overlay, *progress, not fast, source_busy, signature)
+
+
+app.clientside_callback(
+    """
+    function(status) {
+        if (!status) return window.dash_clientside.no_update;
+        window._flowLoadingStatus = status;
+        window.dispatchEvent(new CustomEvent('flow:loading-state', {detail: status}));
+        return status;
+    }
+    """,
+    Output("loading-status-applied", "data"), Input("loading-status-store", "data"),
+)
+
+
+@app.callback(
     Output("cards-area",            "children"),
     Output("error-area",            "children"),
     Output("last-refresh-ts",       "data"),
@@ -8838,9 +8994,14 @@ def update_loading_progress(_poll):
     Input("store-action",           "data"),
     Input("note-action",            "data"),
     Input("priority-test-mode",     "data"),
+    Input("active-filter",          "data"),
+    Input("cards-page-store",       "data"),
+    Input("cards-plate-focus",      "data"),
+    Input("view-mode",              "data"),
     State("data-version",           "data"),
 )
-def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode, current_data_version):
+def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode,
+                     active_filter, page, plate_focus, view_mode, current_data_version):
     _last_poll_time[0] = time.time()
     flow_mode = flow_mode or "inbound"
     state = data_cache.get_state()
@@ -8852,15 +9013,20 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
     poll_only = triggered_ids == {"poll"} or (not triggered_ids and ctx.triggered_id == "poll")
     test_active = bool(priority_test_mode) and flow_mode == "inbound"
 
+    if flow_mode == "uld" or (view_mode or "ops") != "ops":
+        hidden_ts = state["last_refresh"].isoformat() if state.get("last_refresh") else None
+        if not poll_only:
+            return [], html.Span(), hidden_ts, data_version
+        if data_version != current_data_version:
+            return no_update, no_update, hidden_ts, data_version
+        return (no_update,) * 4
+
     if not test_active and state["status"] == "loading" and state.get("refresh_count", 0) == 0:
         return html.Span(), html.Span(), None, current_data_version
 
     ts = state["last_refresh"].isoformat() if state["last_refresh"] else None
     if poll_only and data_version == current_data_version and not _has_due_arrival_transition(state.get("df")):
         return no_update, no_update, no_update, no_update
-
-    if flow_mode == "uld":
-        return no_update, no_update, ts, data_version
 
     if flow_mode == "outbound":
         err_msg = (state.get("outbound_errors") or {}).get("error")
@@ -8874,8 +9040,12 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
             return html.Div("Nincs megjeleníthető outbound rakodás.", className="empty-state"), \
                    html.Span(), ts, data_version
 
-        cards = [_make_outbound_card(r, filter_tokens=_outbound_filter_tokens(r)) for r in cards_data]
-        return _cards_grid(cards, "cards-grid outbound-grid", "Nincs rakodás ebben a kategóriában."), html.Span(), ts, data_version
+        cards_data = [r for r in cards_data if (active_filter or "all") in _outbound_filter_tokens(r).split()]
+        total = len(cards_data)
+        current = max(1, min(_safe_int(page, 1), max(1, (total + _CARDS_PAGE_SIZE - 1) // _CARDS_PAGE_SIZE)))
+        start = (current - 1) * _CARDS_PAGE_SIZE
+        cards = [_make_outbound_card(r, filter_tokens=_outbound_filter_tokens(r)) for r in cards_data[start:start + _CARDS_PAGE_SIZE]]
+        return _paged_cards_grid(cards, total, current, "cards-grid outbound-grid", "Nincs rakodás ebben a kategóriában."), html.Span(), ts, data_version
 
     if not test_active and state["status"] == "error":
         err = html.Div(className="error-toast",
@@ -8912,28 +9082,16 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
     glabs_color_map = _make_id_color_map([r.get("glabs_id") for r in all_rows])
     plate_color_map = _truck_plate_color_map(_active_truck_palette_rows(df))
 
-    cards = [
-        _make_card(r, filter_tokens=_inbound_filter_tokens(r),
-                   glabs_color_map=glabs_color_map, plate_color_map=plate_color_map,
-                   test_mode=test_active)
-        for r in active_df.to_dict("records")
-    ]
-    cards += [
-        _make_card(r, betarolt_view=True, can_unstore=True,
-                   filter_tokens=_inbound_filter_tokens(r, True),
-                   glabs_color_map=glabs_color_map, plate_color_map=plate_color_map)
-        for r in stored_df.to_dict("records")
-    ]
-    cards += [
-        _make_card(r, betarolt_view=True, can_unstore=False,
-                   filter_tokens=_inbound_filter_tokens(r, True),
-                   glabs_color_map=glabs_color_map, plate_color_map=plate_color_map)
-        for r in snapshots
-    ]
-
-    if not cards:
-        return html.Div("Nincs aktív tétel.", className="empty-state"), html.Span(), ts, data_version
-    grid = _cards_grid(cards, "cards-grid", "Nincs tétel ebben a kategóriában.")
+    entries = ([(r, False, True) for r in active_df.to_dict("records")]
+               + [(r, True, True) for r in stored_df.to_dict("records")]
+               + [(r, True, False) for r in snapshots])
+    page_entries, total, current = _page_card_entries(entries, active_filter, plate_focus, page)
+    cards = [_make_card(r, betarolt_view=stored, can_unstore=can_unstore,
+                        filter_tokens=_inbound_filter_tokens(r, stored),
+                        glabs_color_map=glabs_color_map, plate_color_map=plate_color_map,
+                        test_mode=test_active)
+             for r, stored, can_unstore in page_entries]
+    grid = _paged_cards_grid(cards, total, current)
     if test_active:
         grid = html.Div(className="priority-test-view", children=[
             html.Div(className="priority-test-banner", role="status", children=[
@@ -8977,8 +9135,14 @@ def fill_summary(_open_clicks, priority_test_mode):
     Output("refresh-info", "children"),
     Input("tick", "n_intervals"),
     Input("last-refresh-ts", "data"),
+    Input("priority-test-mode", "data"),
 )
-def update_countdown(_tick, ts):
+def update_countdown(_tick, ts, test_mode=False):
+    if test_mode:
+        return [
+            html.Span("TESZTMÓD", className="last-refresh-text"),
+            _source_test_status("ecomm"), _source_test_status("pallets"),
+        ]
     source_badge = _ecomm_source_badge()
     pallets_badge = _pallets_source_badge()
     stall_badge = _sync_stall_badge()
@@ -10005,7 +10169,6 @@ def _shutdown_watchdog():
         if post_idle_seconds >= _NO_POST_SHUTDOWN_SECONDS:
             print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc POST nelkuli allapot - szerver leallitasa...", flush=True)
             activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc POST hiány")
-            hub_presence.stop()
             time.sleep(0.5)
             os._exit(0)
 
@@ -10013,7 +10176,6 @@ def _shutdown_watchdog():
         if idle_seconds >= _INACTIVITY_SHUTDOWN_SECONDS:
             print(f"\n  {_INACTIVITY_TIMEOUT_MINUTES} perc bongeszo inaktivitas - szerver leallitasa...", flush=True)
             activity_log.log_session_end(f"{_INACTIVITY_TIMEOUT_MINUTES} perc inaktivitás")
-            hub_presence.stop()
             time.sleep(0.5)
             os._exit(0)
 
@@ -10040,7 +10202,6 @@ def _register_exit_handlers():
             activity_log.log_session_end(reason)
         except Exception:
             pass
-        hub_presence.stop()
         os._exit(0)
 
     # SIGINT (Ctrl+C) and SIGTERM (taskkill without /F)
@@ -10066,7 +10227,6 @@ def _register_exit_handlers():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    hub_presence.start("inbound", APP_VERSION)
     _register_exit_handlers()
     activity_log.cleanup_old()
     activity_log.log_event("app_start", {"pid": os.getpid()})
@@ -10097,10 +10257,4 @@ if __name__ == "__main__":
     )
     print(flush=True)
 
-    try:
-        app.run(debug=False, port=PORT, host=_SERVER_HOST, use_reloader=False, threaded=True)
-    except Exception as exc:
-        hub_presence.event("error", exc)
-        raise
-    finally:
-        hub_presence.stop()
+    app.run(debug=False, port=PORT, host=_SERVER_HOST, use_reloader=False, threaded=True)

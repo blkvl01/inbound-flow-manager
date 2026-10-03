@@ -24,6 +24,16 @@
   var mutationObserver = null;
   var refreshTimer = 0;
   var alignTimer = 0;
+  var metricFrame = 0;
+  var headerNode = null;
+  var headerObserver = null;
+  var headerHeight = 0;
+  var headerNaturalTop = 12;
+  var headerStickyTop = 0;
+  var metricsDirty = true;
+  var lastOffset = null;
+  var lastVisibleHeight = null;
+  var lastRootMode = null;
 
   var REVEAL_SELECTORS = [
     ".kpi-page-head",
@@ -73,10 +83,42 @@
   }
 
   function snapOffset() {
-    var header = document.querySelector(".app-header");
-    if (!header || !header.getBoundingClientRect) return 8;
-    var r = header.getBoundingClientRect();
-    return Math.max(8, Math.ceil(Math.max(0, r.bottom)) + 10);
+    if (metricsDirty) measureHeader();
+    if (!headerNode) return 8;
+    var top = Math.max(headerStickyTop, headerNaturalTop - window.scrollY);
+    return Math.max(8, Math.ceil(Math.max(0, top + headerHeight)) + 10);
+  }
+
+  function measureHeader() {
+    metricsDirty = false;
+    var next = document.querySelector(".app-header");
+    if (next !== headerNode) {
+      if (headerObserver) headerObserver.disconnect();
+      headerNode = next;
+      if (headerNode && typeof ResizeObserver !== "undefined") {
+        headerObserver = new ResizeObserver(function () {
+          metricsDirty = true;
+          scheduleMetrics();
+        });
+        headerObserver.observe(headerNode);
+      }
+    }
+    if (!headerNode) return;
+    var bounds = headerNode.getBoundingClientRect();
+    headerHeight = bounds.height;
+    var style = window.getComputedStyle(headerNode);
+    headerStickyTop = parseFloat(style.top) || 0;
+    // At the document top the sticky header still includes its normal margin.
+    // Later scroll frames can derive the anchor without reading layout again.
+    if (bounds.top > headerStickyTop || window.scrollY < 1) headerNaturalTop = bounds.top + window.scrollY;
+  }
+
+  function scheduleMetrics() {
+    if (metricFrame || document.hidden || !isKpiMode()) return;
+    metricFrame = requestAnimationFrame(function () {
+      metricFrame = 0;
+      syncSnapMetrics();
+    });
   }
 
   function snapViewportH() {
@@ -84,10 +126,22 @@
   }
 
   function syncSnapMetrics() {
+    var mode = !!isKpiMode();
+    if (lastRootMode !== mode) {
+      document.documentElement.classList.toggle("view-kpi-mode-root", mode);
+      lastRootMode = mode;
+    }
+    if (!mode || document.hidden) return;
     var offset = snapOffset();
-    document.documentElement.classList.toggle("view-kpi-mode-root", isKpiMode());
-    document.documentElement.style.setProperty("--kpi-snap-offset", offset + "px");
-    document.documentElement.style.setProperty("--kpi-snap-visible-h", Math.max(320, viewportH() - offset - 8) + "px");
+    var height = Math.max(320, viewportH() - offset - 8);
+    if (offset !== lastOffset) {
+      document.documentElement.style.setProperty("--kpi-snap-offset", offset + "px");
+      lastOffset = offset;
+    }
+    if (height !== lastVisibleHeight) {
+      document.documentElement.style.setProperty("--kpi-snap-visible-h", height + "px");
+      lastVisibleHeight = height;
+    }
   }
 
   function activeIndex(list) {
@@ -379,6 +433,7 @@
   }
 
   function refreshRevealUnits(resetVisible) {
+    if (!isKpiMode() || document.hidden) return;
     var host = page();
     if (!host) return;
     document.body.classList.add("kpi-snap-ready");
@@ -421,18 +476,24 @@
   }
 
   function setupMutationObserver() {
-    if (mutationObserver) return;
     var host = page();
-    if (!host || typeof MutationObserver === "undefined") return;
-    mutationObserver = new MutationObserver(function () {
-      scheduleRevealRefresh(false);
+    if (!host || typeof MutationObserver === "undefined" || !isKpiMode() || document.hidden) return;
+    if (!mutationObserver) mutationObserver = new MutationObserver(function (records) {
+      if (!isKpiMode() || document.hidden) return;
+      // Chart count-up writes text every frame. Only element additions/removals
+      // can change the reveal-unit set, so ignore text-only records.
+      var changed = records.some(function (record) {
+        return Array.prototype.some.call(record.addedNodes, function (node) { return node.nodeType === 1; }) ||
+          Array.prototype.some.call(record.removedNodes, function (node) { return node.nodeType === 1; });
+      });
+      if (changed) scheduleRevealRefresh(false);
     });
     mutationObserver.observe(host, { childList: true, subtree: true });
   }
 
   var lastActiveIdx = -1;
   function syncActiveClass() {
-    if (!isKpiMode()) return;
+    if (!isKpiMode() || document.hidden) return;
     syncSnapMetrics();
     var list = segments();
     var idx = activeIndex(list);
@@ -515,7 +576,11 @@
       var scrollable = Math.max(1, r.height - (viewportH() - top));
       prog = Math.max(0, Math.min(1, (top - r.top) / scrollable));
     }
-    dotsRail.style.setProperty("--snap-progress", prog.toFixed(3));
+    var progress = prog.toFixed(3);
+    if (dotsRail.dataset.progress !== progress) {
+      dotsRail.style.setProperty("--snap-progress", progress);
+      dotsRail.dataset.progress = progress;
+    }
   }
 
   function setup() {
@@ -525,25 +590,29 @@
     document.addEventListener("touchmove", touchMove, { passive: false, capture: true });
     document.addEventListener("touchend", touchEnd, { passive: true, capture: true });
     window.addEventListener("resize", function () {
-      syncSnapMetrics();
+      metricsDirty = true;
+      scheduleMetrics();
       scheduleRevealRefresh(false);
       if (isKpiMode()) setTimeout(syncActiveClass, 120);
     });
     window.addEventListener("scroll", function () {
       if (!isKpiMode()) return;
       markBgActivity();
-      syncSnapMetrics();
+      scheduleMetrics();
       clearTimeout(window.__kpiSnapScrollTimer);
       window.__kpiSnapScrollTimer = setTimeout(syncActiveClass, 90);
     }, { passive: true });
     document.addEventListener("visibilitychange", function () {
       document.body.classList.toggle("kpi-bg-hidden", document.hidden);
+      updateLifecycle();
     });
     // Re-arm the snap + reveal observers when the KPI page (or a subpage) is shown.
     // resetVisible is FALSE: a unit that has already played its opening stays
     // revealed — openings run ONCE, never replay on re-show / scroll-back.
     function onKpiShown() {
+      metricsDirty = true;
       setTimeout(function () {
+        if (!isKpiMode() || document.hidden) return;
         syncSnapMetrics();
         setupMutationObserver();
         refreshRevealUnits(false);
@@ -554,7 +623,40 @@
     // Dispatched on a subpage switch to an ALREADY-opened subpage: snap/dots only,
     // no chart-module replay (the chart modules don't listen to this event).
     window.addEventListener("kpi-subview-shown", onKpiShown);
+    function updateLifecycle() {
+      syncSnapMetrics();
+      if (isKpiMode() && !document.hidden) {
+        onKpiShown();
+        return;
+      }
+      if (mutationObserver) mutationObserver.disconnect();
+      if (revealObserver) revealObserver.disconnect();
+      if (headerObserver) headerObserver.disconnect();
+      headerNode = null;
+      metricsDirty = true;
+      clearTimeout(refreshTimer);
+      clearTimeout(alignTimer);
+      clearTimeout(window.__kpiSnapScrollTimer);
+      clearTimeout(bgPauseTimer);
+      if (metricFrame) cancelAnimationFrame(metricFrame);
+      metricFrame = 0;
+      window.__kpiSnapActive = false;
+    }
+    var wasActive = !!isKpiMode();
+    if (typeof MutationObserver !== "undefined") {
+      new MutationObserver(function () {
+        var active = !!isKpiMode();
+        if (active !== wasActive) { wasActive = active; updateLifecycle(); }
+      }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    }
+    document.addEventListener("transitionend", function (event) {
+      if (headerNode && (event.target === headerNode || headerNode.contains(event.target))) {
+        metricsDirty = true;
+        scheduleMetrics();
+      }
+    }, true);
     setTimeout(function () {
+      if (!isKpiMode() || document.hidden) return;
       syncSnapMetrics();
       setupMutationObserver();
       refreshRevealUnits(false);

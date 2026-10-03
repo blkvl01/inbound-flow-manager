@@ -94,3 +94,10 @@ desktop.ini
 # Live Oracle reconciliation evidence stays local, including future revisions.
 /docs/oracle_head_detail_discrepancies.md
 .cloud-state/
+
+# Local performance evidence, browser probes, and packaged verification builds
+/output/
+/.playwright-cli/
+/build-*/
+/dist-*/
+/release*/

@@ -2,9 +2,7 @@
    Flow Manager
    ============================================================ */
 
-/* Vendor assets – present in EXE build; graceful 404 in dev (CDN used instead) */
-@import url('./vendor/bootstrap-cyborg.min.css');
-@import url('./vendor/inter-font.css');
+/* Dash loads local vendor styles once with a versioned asset URL. */
 
 /* ─── Tokens ──────────────────────────────────────────────── */
 
@@ -10684,19 +10682,23 @@ html.hdr-morphing .glabs-progress-fill {
   animation: none !important;
 }
 
-/* — Scroll performance kill-switch (html.is-scrolling, set by header_condense.js
-     for ~140ms after each scroll event). This generalises the hdr-morphing
-     blur-suspend to ordinary scrolling: a backdrop-filter panel must re-sample
-     and re-blur whatever moves behind it on EVERY scroll frame, and with 150+
-     glass surfaces (header, cards, bars, KPI trays, ULD panels — many at
-     blur 22-36px) that per-frame re-blur is what makes the page feel choppy.
-     Dropping only the blur (not the background/border/shadow) while the page is
-     in motion keeps every surface visually identical at rest — the blur returns
-     the instant scrolling settles — while letting the browser composite the
-     scroll on the GPU fast path instead of repainting the glass each frame. — */
-html.is-scrolling *,
-html.is-scrolling *::before,
-html.is-scrolling *::after {
+/* Scroll sampling is suspended only on the moving glass surfaces. Avoid a
+   universal selector here: toggling it restyles every node in a large dashboard.
+   Main card/ULD/chart surfaces use the same static frost at rest and in motion. */
+html.is-scrolling .priority-card,
+html.is-scrolling .outbound-glabs-block,
+html.is-scrolling .outbound-summary-grid > div,
+html.is-scrolling .stats-bar,
+html.is-scrolling .legend-bar,
+html.is-scrolling .kpi-card,
+html.is-scrolling .kpi-composition-card,
+html.is-scrolling .flow-switch,
+html.is-scrolling .uld-header,
+html.is-scrolling .uld-stacks-panel,
+html.is-scrolling .uld-list-panel,
+html.is-scrolling .kpi-page-chart-card,
+html.is-scrolling .kpi-trend-chart-shell,
+html.is-scrolling .kpi-temu-chart-shell {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -10732,33 +10734,10 @@ html.is-scrolling:not(.hdr-morphing) .app-header {
   -webkit-backdrop-filter: blur(17px) saturate(185%) brightness(1.08) !important;
 }
 
-/* The inbound/outbound cards sit over a near-black page and get ALL their
-   lightness from the blur sampling the bright orbs from a wide radius — the
-   card body itself is only ~6% white. So `backdrop-filter: none` collapsed them
-   to 6% white over near-black = the "black layer" while scrolling, and a cheap
-   brightness-only filter can't fix it (1.12 × near-black is still near-black).
-   Keep these cards FULLY frosted while scrolling, like the sticky header: a
-   handful of cards re-blurring is an acceptable cost for not flashing black, and
-   the dominant scroll win (header + all the other suspended glass) stands. Value
-   = the effective .priority-card blur (style.css ~2010). */
-html.is-scrolling .priority-card,
-html.is-scrolling .outbound-card,
-html.is-scrolling .outbound-glabs-block,
-html.is-scrolling .outbound-summary-grid > div {
-  backdrop-filter: blur(18px) saturate(215%) brightness(1.12) contrast(1.04) !important;
-  -webkit-backdrop-filter: blur(18px) saturate(215%) brightness(1.12) contrast(1.04) !important;
-}
+/* Moving cards use the stable frosted base defined at the end of this file.
+   Their lightness no longer depends on sampling the moving page behind them. */
 
-/* The stats-bar and legend-bar are semi-sticky UI chrome above the card grid. Their
-   glass effect drops during scroll (universal kill-switch), making the bars around the
-   cards visually change mid-scroll. Keep them frosted like the app-header — they're
-   two elements, not 150, so the reblur cost is trivial. Value = effective blur from
-   the liquid-glass pass (~3152: blur 16px saturate 220%). */
-html.is-scrolling .stats-bar,
-html.is-scrolling .legend-bar {
-  backdrop-filter: blur(16px) saturate(220%) brightness(1.10) contrast(1.03) !important;
-  -webkit-backdrop-filter: blur(16px) saturate(220%) brightness(1.10) contrast(1.03) !important;
-}
+/* Stats/legend bars use the same stable frost at rest and during scroll. */
 
 /* The kpi-bec-panel-inner floats above the page as a pinnable popup. Losing its blur
    while the user scrolls makes it flash flat. Keep it frosted (one element, cheap). */
@@ -31464,4 +31443,121 @@ html.hdr-mini .tv-launch-icon {
     grid-row: 3;
     justify-self: center;
   }
+}
+/* Original Excel source recovery, scoped to the refresh information line. */
+.refresh-info .source-status-group { display: inline-grid; grid-template-columns: auto auto; align-items: center; justify-content: end; gap: 6px; }
+.refresh-info .source-open-btn { font: inherit; font-size: 11px; color: #efc47d; background: rgba(239, 196, 125, .08); border: 1px solid rgba(239, 196, 125, .35); border-radius: 5px; padding: 4px 7px; cursor: pointer; }
+.refresh-info .source-open-btn:hover { background: rgba(239, 196, 125, .18); }
+.refresh-info .source-open-btn:focus-visible { outline: 2px solid #efc47d; outline-offset: 3px; }
+.refresh-info .source-open-btn:disabled { opacity: .55; cursor: wait; }
+.refresh-info .source-open-feedback { grid-column: 1 / -1; justify-self: end; text-align: right; font-size: 11px; color: #b8c3d0; max-width: 320px; white-space: normal; }
+.refresh-info .source-open-feedback:empty { display: none; }
+.refresh-info .source-open-feedback.is-error { color: #f49c9c; }
+.refresh-info .source-open-btn:active:not(:disabled) { background: rgba(239, 196, 125, .25); border-color: #efc47d; }
+body.theme-light .refresh-info .source-open-btn { color: #74500a; background: #fff7e7; border-color: #a97a2c; }
+body.theme-light .refresh-info .source-open-btn:hover { background: #ffedc7; }
+body.theme-light .refresh-info .source-open-btn:active:not(:disabled) { background: #ffe0a3; border-color: #74500a; }
+body.theme-light .refresh-info .source-open-btn:focus-visible { outline-color: #74500a; }
+body.theme-light .refresh-info .source-open-feedback { color: #405065; }
+body.theme-light .refresh-info .source-open-feedback.is-error { color: #a32323; }
+
+/* Performance: static frost keeps the established bright bevel, tint and rim
+   without repeatedly filtering a moving background. These bases are identical
+   at rest and during scroll, so the former dark flash cannot occur. */
+.priority-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background:
+    linear-gradient(177deg, rgba(255,255,255,0.12), rgba(255,255,255,0.025) 28%, transparent 65%),
+    radial-gradient(ellipse 125% 68% at -10% -10%, var(--glow-tint, transparent), transparent 58%),
+    radial-gradient(ellipse 90% 45% at 100% 0%, var(--glow-ultra, transparent), transparent 54%),
+    rgba(28,34,52,0.88);
+}
+.outbound-glabs-block,
+.outbound-summary-grid > div {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.stats-bar,
+.legend-bar {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background:
+    radial-gradient(110% 90% at 8% 0%, rgba(255,255,255,0.16), transparent 42%),
+    linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.025)),
+    rgba(25,31,48,0.90);
+}
+body.flow-uld-mode .uld-header,
+body.flow-uld-mode .uld-stacks-panel,
+body.flow-uld-mode .uld-list-panel {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background:
+    radial-gradient(130% 90% at 7% -18%, rgba(255,255,255,0.13), transparent 45%),
+    radial-gradient(90% 80% at 108% 0%, rgba(99,102,241,0.11), transparent 50%),
+    linear-gradient(145deg, rgba(255,255,255,0.095), rgba(255,255,255,0.030)),
+    rgba(22,29,47,0.90) !important;
+}
+/* The chart surfaces already have their own layered glass base. Preserve that
+   base and all status/approved ring animations, removing only live sampling. */
+.kpi-page-chart-card,
+.kpi-page-metric,
+.kpi-trend-chart-shell,
+.kpi-temu-chart-shell,
+.kpi-temu-ctl,
+.kpi-bands-section {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* These header decorations are often mounted inside an invisible popup. They
+   resume on deliberate interaction; tracking/bands/metric rings stay intact. */
+.kpi-muszak-panel-inner::before,
+.kpi-muszak-panel-inner::after,
+.kpi-mode-btn.is-active {
+  animation-play-state: paused;
+}
+.kpi-muszak-wrapper:hover .kpi-muszak-panel-inner::before,
+.kpi-muszak-wrapper:hover .kpi-muszak-panel-inner::after,
+.kpi-muszak-wrapper:focus-within .kpi-muszak-panel-inner::before,
+.kpi-muszak-wrapper:focus-within .kpi-muszak-panel-inner::after,
+.kpi-muszak-wrapper:hover .kpi-mode-btn.is-active,
+.kpi-muszak-wrapper:focus-within .kpi-mode-btn.is-active {
+  animation-play-state: running;
+}
+body.kpi-bg-hidden .kpi-muszak-panel-inner::before,
+body.kpi-bg-hidden .kpi-muszak-panel-inner::after,
+body.kpi-bg-hidden .kpi-mode-btn.is-active {
+  animation-play-state: paused;
+}
+.cards-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 14px 16px;
+  flex-wrap: wrap;
+}
+.cards-page-info { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cards-page-btn {
+  padding: 7px 13px;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 9px;
+  background: rgba(255,255,255,0.07);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.cards-page-btn:hover:not(:disabled) { background: rgba(255,255,255,0.13); border-color: rgba(255,255,255,0.30); }
+.cards-page-btn:focus-visible { outline: 2px solid #a5cfff; outline-offset: 3px; }
+.cards-page-btn:disabled { opacity: 0.42; cursor: default; }
+body.theme-light .priority-card,
+body.theme-light .stats-bar,
+body.theme-light .legend-bar { background-color: rgba(242,246,252,0.94); }
+@media (prefers-reduced-motion: reduce) {
+  .kpi-muszak-panel-inner::before,
+  .kpi-muszak-panel-inner::after,
+  .kpi-mode-btn.is-active { animation: none !important; }
+  .cards-page-btn { transition: none; }
 }

@@ -19,6 +19,21 @@
   var openingTimer = 0;
   var lastOpenTs = 0;
   var fillSettleTimer = 0;
+  var bandsHostIds = ["kpi-bands-summary", "kpi-bands-chart", "kpi-bands-grid"];
+  function activeBands() { return !window.__kpiActiveSubview || window.__kpiActiveSubview() === "tracking"; }
+  window.__unmountKpiBands = function () {
+    if (revealObserver) revealObserver.disconnect();
+    revealObserver = null;
+    clearTimeout(openingTimer);
+    clearTimeout(fillSettleTimer);
+    openingTimer = fillSettleTimer = 0;
+    lastRenderSig = lastCountSig = "";
+    revealArmed = false;
+    revealed = false;
+    var section = document.querySelector(".kpi-bands-section");
+    if (section) section.classList.remove("is-opening", "kpi-reveal-pending");
+    if (window.__clearKpiHosts) window.__clearKpiHosts(bandsHostIds);
+  };
 
   var DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -763,7 +778,7 @@
     return !!(section && section.classList.contains("is-kpi-snap-active"));
   }
   function revealSection(section) {
-    if (!section || revealed) return;
+    if (!section || revealed || !activeBands()) return;
     revealed = true;
     revealArmed = false;
     lastOpenTs = Date.now();
@@ -794,6 +809,7 @@
   }
 
   function armReveal() {
+    if (!activeBands()) return;
     var section = document.querySelector(".kpi-bands-section");
     if (!section) return;
     if (reduceMotion()) {
@@ -829,6 +845,7 @@
   }
 
   function render(animateIfVisible) {
+    if (!activeBands()) return;
     var section = document.querySelector(".kpi-bands-section");
     var chartHost = document.getElementById("kpi-bands-chart");
     var gridHost = document.getElementById("kpi-bands-grid");
@@ -1037,6 +1054,7 @@
   });
 
   window.__renderKpiBands = function (data) {
+    if (!activeBands()) return;
     var keepDate = currentDay() && currentDay().date;
     payload = normalizePayload(data || {});
     var list = days();
@@ -1058,9 +1076,11 @@
     lastRenderSig = sig;
     lastCountSig = "";
     render(revealed);
+    if (window.__markKpiHosts) window.__markKpiHosts(bandsHostIds);
   };
 
   window.addEventListener("kpi-view-entered", function () {
+    if (!activeBands()) return;
     // Reset per-KPI-session reveal gate so the opening plays on first visit.
     revealed = false;
     armReveal();
@@ -1068,6 +1088,7 @@
 
   // Replay the staggered opening when the user snaps onto this panel.
   function replayOpening() {
+    if (!activeBands()) return;
     var section = document.querySelector(".kpi-bands-section");
     if (!section || reduceMotion() || !document.querySelector(".kpi-bands-col")) return;
     if (Date.now() - lastOpenTs < 750) return;   // dedupe rapid double-settles

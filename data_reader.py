@@ -3,6 +3,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import tempfile
 import time
 import unicodedata
@@ -16,6 +17,8 @@ import openpyxl
 import pandas as pd
 from pyxlsb import open_workbook
 from pyxlsb import biff12
+from pyxlsb.reader import BIFF12Reader, RecordReader
+from pyxlsb.handlers import CellHandler
 
 from config import ECOMM_FILE, PALLETS_FILE
 import oracle_ecomm
@@ -76,7 +79,13 @@ def _temp_copy(src: str) -> str:
     last_exc: Exception | None = None
     for attempt in range(_COPY_RETRIES):
         try:
+            before = os.stat(src)
             shutil.copy2(src, tmp)
+            after = os.stat(src)
+            copied = os.stat(tmp)
+            version = lambda stat: (stat.st_mtime_ns, stat.st_size)
+            if version(before) != version(after) or version(copied) != version(before):
+                raise OSError("A forrásfájl a munkamásolat készítése közben megváltozott.")
             return tmp
         except (PermissionError, OSError) as exc:
             last_exc = exc
@@ -91,6 +100,21 @@ def _temp_copy(src: str) -> str:
     except OSError:
         pass
     raise last_exc if last_exc is not None else OSError(f"Could not copy source: {src}")
+
+
+def _file_source_signature(path: str) -> dict:
+    """The same portable source identity used by the dashboard cache."""
+    try:
+        stat = os.stat(path)
+        return {"mtime": stat.st_mtime, "size": stat.st_size}
+    except OSError:
+        return {"mtime": 0.0, "size": 0}
+
+
+def _snapshot_source_signature(source: str, snapshot: str) -> dict:
+    # copy2 preserves the source timestamp. _temp_copy verified it against both
+    # the before/after source stats; later live changes must not relabel this read.
+    return {source: _file_source_signature(snapshot)}
 
 # Current 0-based column indices in the E_COMM ``E-comm`` sheet. The temporary
 # blank T column seen on 2026-07-14 is no longer present in the live 2026-07-22
@@ -246,7 +270,7 @@ def _resolve_ecomm_column_map(
     )
 
 
-def _iter_selected_xlsb_rows(sheet, indices):
+def _iter_decoded_xlsb_rows(sheet, indices):
     """Yield Excel row numbers and values without materialising unused cells.
 
     pyxlsb's public rows() allocates one Cell per column in the sheet's
@@ -286,6 +310,101 @@ def _iter_selected_xlsb_rows(sheet, indices):
             if values is not None:
                 yield row_number + 1, values
             break
+
+
+_XLSB_BUFFER_LIMIT = 128 * 1024 * 1024
+_XLSB_CELL_MIN_LENGTH = {
+    biff12.BLANK: 8, biff12.NUM: 12, biff12.BOOLERR: 9,
+    biff12.BOOL: 9, biff12.FLOAT: 16, biff12.STRING: 12,
+    biff12.FORMULA_STRING: 12, biff12.FORMULA_FLOAT: 16,
+    biff12.FORMULA_BOOL: 9, biff12.FORMULA_BOOLERR: 9,
+}
+
+
+def _iter_selected_xlsb_rows(sheet, indices):
+    """Decode values only for requested columns; retain pyxlsb value semantics.
+
+    The format-sensitive path is limited to the known pyxlsb reader/handlers.
+    Unsupported internals or oversized sheets fall back before yielding rows.
+    Corrupt/truncated records fail the read; falling back after yielding would
+    duplicate rows and could silently apply an incomplete operational snapshot.
+    """
+    reader = getattr(sheet, "_reader", None)
+    offset = getattr(sheet, "_data_offset", None)
+    if (type(reader) is not BIFF12Reader or not isinstance(offset, int)
+            or not hasattr(getattr(reader, "_fp", None), "read")
+            or any(type(reader.handlers.get(kind)) is not CellHandler
+                   for kind in _XLSB_CELL_MIN_LENGTH)):
+        yield from _iter_decoded_xlsb_rows(sheet, indices)
+        return
+
+    reader.seek(offset, os.SEEK_SET)
+    buf = reader._fp.read(_XLSB_BUFFER_LIMIT + 1)
+    if len(buf) > _XLSB_BUFFER_LIMIT:
+        yield from _iter_decoded_xlsb_rows(sheet, indices)
+        return
+    positions = {column: position for position, column in enumerate(indices)}
+    strings = getattr(sheet, "_stringtable", None)
+    p, size = 0, len(buf)
+    values, row_number = None, None
+    while p < size:
+        record_type = 0
+        for i in range(4):
+            if p >= size:
+                raise ValueError("Hiányos XLSB rekordazonosító.")
+            byte = buf[p]
+            p += 1
+            # pyxlsb keeps the continuation bits in the record identifier.
+            record_type |= byte << (8 * i)
+            if not byte & 128:
+                break
+        else:
+            raise ValueError("Érvénytelen XLSB rekordazonosító.")
+        length = 0
+        for i in range(4):
+            if p >= size:
+                raise ValueError("Hiányos XLSB rekordhossz.")
+            byte = buf[p]
+            p += 1
+            length |= (byte & 127) << (7 * i)
+            if not byte & 128:
+                break
+        else:
+            raise ValueError("Érvénytelen XLSB rekordhossz.")
+        end = p + length
+        if end > size:
+            raise ValueError("Hiányos XLSB rekordadat.")
+        if record_type == biff12.ROW:
+            if length < 4:
+                raise ValueError("Hiányos XLSB sorrekord.")
+            next_row = struct.unpack_from("<I", buf, p)[0]
+            if row_number is not None and next_row <= row_number:
+                raise ValueError("Érvénytelen XLSB sorsorrend.")
+            if values is not None:
+                yield row_number + 1, values
+            row_number, values = next_row, [None] * len(indices)
+        elif record_type in _XLSB_CELL_MIN_LENGTH:
+            if length < _XLSB_CELL_MIN_LENGTH[record_type]:
+                raise ValueError("Hiányos XLSB cellarekord.")
+            column = struct.unpack_from("<I", buf, p)[0]
+            position = positions.get(column)
+            if position is not None and values is not None:
+                if record_type == biff12.FORMULA_STRING:
+                    chars = struct.unpack_from("<I", buf, p + 8)[0]
+                    if 12 + chars * 2 > length:
+                        raise ValueError("Hiányos XLSB szövegcella.")
+                with RecordReader(buf[p:end]) as record_reader:
+                    record = reader.handlers[record_type].read(record_reader, record_type, length)
+                value = record.v
+                if record_type == biff12.STRING and strings is not None:
+                    value = strings[value]
+                values[position] = value
+        elif record_type == biff12.SHEETDATA_END:
+            if values is not None:
+                yield row_number + 1, values
+            return
+        p = end
+    raise ValueError("Hiányzik az XLSB munkalapadatok zárórekordja.")
 
 
 _ECOMM_MAX_EXCEL_ROW = 25000  # operational rows have grown beyond the legacy 10,000-row KPI export range
@@ -817,11 +936,17 @@ def load_uld_data_fast(
         try:
             # This is the common case for a locally hydrated OneDrive file and
             # avoids a second full XLSB copy during cold start.
+            before = _file_source_signature(ECOMM_FILE)
             records = _read_uld_records_from_workbook(ECOMM_FILE, progress_callback)
+            if before != _file_source_signature(ECOMM_FILE):
+                raise OSError("Az E_COMM a gyors ULD-beolvasás közben megváltozott.")
+            meta["_source_signature"] = {ECOMM_FILE: before}
         except Exception as direct_exc:
             log.info("Direct fast ULD read failed; retrying from a snapshot: %s", direct_exc)
             tmp_path = _temp_copy(ECOMM_FILE)
+            meta["_source_signature"] = _snapshot_source_signature(ECOMM_FILE, tmp_path)
             records = _read_uld_records_from_workbook(tmp_path, progress_callback)
+        meta["_source_signature"]["ecomm_source_mode"] = oracle_ecomm.get_source_mode()
         uld_data, result_meta = _fast_uld_data_from_records(records, meta)
         _notify_progress(
             progress_callback,
@@ -2462,6 +2587,10 @@ def _read_ecomm_excel_raw(
 
         _notify_progress(progress_callback, 12, "E_COMM előkészítése", "Biztonságos munkamásolat készül")
         tmp_path = _temp_copy(ECOMM_FILE)
+        meta["_source_signature"] = _snapshot_source_signature(ECOMM_FILE, tmp_path)
+        snapshot_mtime = meta["_source_signature"][ECOMM_FILE]["mtime"]
+        if snapshot_mtime:
+            meta["ecomm_source_mtime"] = datetime.fromtimestamp(snapshot_mtime).isoformat()
         _notify_progress(progress_callback, 16, "E_COMM szerkezetének ellenőrzése", "Oszlopok és fejléc felismerése")
         column_index, header_row = _resolve_ecomm_column_map(tmp_path)
         ordered_columns = sorted(column_index.items(), key=lambda item: item[1])
@@ -2580,6 +2709,15 @@ def _read_ecomm(
         kpi_data = _compute_kpi(raw)
         kpi_data.update(source_meta)
 
+        # Reuse this exact raw version for the full ULD lifecycle snapshot. GHA
+        # evidence and dated returns can occur on rows with no active transfer
+        # or no AWB; filtering first would force a second XLSB read to restore it.
+        uld_columns = [name for name in _ECOMM_ULD_NAMES if name in raw.columns]
+        uld_data, uld_meta = _fast_uld_data_from_records(
+            raw[uld_columns].to_dict("records"), source_meta
+        )
+        kpi_data["_uld_meta"] = uld_meta
+
         # Drop rows where awb is missing for the active item list and AWB lookups.
         raw = raw[raw["awb"] != ""].copy()
 
@@ -2614,8 +2752,7 @@ def _read_ecomm(
         # Now apply the AL (Áttár) filter for active-item logic
         raw = raw[raw["am_raw"].notna()]
 
-        # Extract open ULD data (ULD azonosító + Áttár filled, Vissza empty)
-        uld_data = _extract_uld_data(raw)
+        # Already extracted above from the same unfiltered source version.
         log.info("Nyitott ULD-k: %d db", len(uld_data))
 
         status_keys = raw["status_n"].apply(_status_key)
@@ -2814,8 +2951,10 @@ def _read_pallets() -> pd.DataFrame:
 
     rows = []
     tmp_path: str | None = None
+    wb = None
     try:
         tmp_path = _temp_copy(PALLETS_FILE)
+        copied_signature = _snapshot_source_signature(PALLETS_FILE, tmp_path)
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -2823,7 +2962,9 @@ def _read_pallets() -> pd.DataFrame:
                 category=UserWarning,
                 module="openpyxl",
             )
-            wb = openpyxl.load_workbook(tmp_path, read_only=True, keep_vba=True, data_only=True)
+            wb = openpyxl.load_workbook(
+                tmp_path, read_only=True, keep_vba=False, keep_links=False, data_only=True
+            )
         ws = wb["Rakodások"]
         for row in ws.iter_rows(min_row=2, max_col=14, values_only=True):
             if not row:
@@ -2858,7 +2999,6 @@ def _read_pallets() -> pd.DataFrame:
                 "location":       str(row[9]).strip() if len(row) > 9 and not _empty(row[9]) else None,
                 "load_note":      str(row[13]).strip() if len(row) > 13 and not _empty(row[13]) else None,
             })
-        wb.close()
     except Exception as exc:
         log.error("BUD-Pallets read error: %s", exc, exc_info=True)
         # Flag the failure on the frame so load_all_flow_data can keep the last
@@ -2867,6 +3007,11 @@ def _read_pallets() -> pd.DataFrame:
         empty.attrs["pallets_read_error"] = str(exc)
         return empty
     finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception as exc:
+                log.debug("BUD-Pallets workbook close failed: %s", exc)
         if tmp_path:
             try:
                 os.unlink(tmp_path)
@@ -2874,6 +3019,7 @@ def _read_pallets() -> pd.DataFrame:
                 pass
     result = pd.DataFrame(rows)
     result.attrs["pallets_source_type"] = "excel"
+    result.attrs["_source_signature"] = copied_signature
     return result
 
 
@@ -3422,4 +3568,12 @@ def load_all_flow_data(
                     issued_awbs.add(base)
 
     _notify_progress(progress_callback, 97, "Felület előkészítése", "Az adatok rendezése befejeződik")
+    if isinstance(kpi, dict):
+        mode = oracle_ecomm.get_source_mode()
+        signature = dict(kpi.get("_source_signature") or {})
+        signature.update(pallets.attrs.get("_source_signature") or {})
+        signature["ecomm_source_mode"] = mode
+        if mode == "oracle":
+            signature.update({ECOMM_FILE: {"source": "oracle"}, PALLETS_FILE: {"source": "oracle"}})
+        kpi["_source_signature"] = signature
     return df, errors, kpi, outbound_cards, outbound_errors, issued_awbs, uld_data

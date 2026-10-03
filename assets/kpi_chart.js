@@ -88,9 +88,7 @@
         text = String(text == null ? '' : text);
         if (el.textContent === text) return;
         el.textContent = text;
-        el.classList.remove('kpi-value-changing');
-        void el.offsetWidth;
-        el.classList.add('kpi-value-changing');
+        pulseValue(el);
     }
     function activeData() { return state.view === 'prev' ? state.prev : state.current; }
     function activeAccent() { return accents[state.mode] || accents.inbound; }
@@ -323,16 +321,30 @@
     }
 
     function pulseValue(el) {
-        if (!el) return;
-        el.classList.remove('kpi-value-changing');
-        void el.offsetWidth;
-        el.classList.add('kpi-value-changing');
+        if (!el || document.hidden || el.__kpInternalWrite || el.__kpAnim) return;
+        var text = el.textContent;
+        if (el.__kpiPulseText === text) return;
+        el.__kpiPulseText = text;
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        // Restart the same settle effect without a synchronous layout read.
+        // The count-up module's own writes are ignored above.
+        if (el.animate) {
+            if (el.__kpiPulseAnimation) el.__kpiPulseAnimation.cancel();
+            el.__kpiPulseAnimation = el.animate([
+                { opacity: 0.62, transform: 'translateY(3px) scale(0.985)' },
+                { opacity: 1, transform: 'translateY(0) scale(1)' }
+            ], { duration: 340, easing: 'cubic-bezier(0.22,1,0.36,1)' });
+        } else if (!el.classList.contains('kpi-value-changing')) {
+            el.classList.add('kpi-value-changing');
+            setTimeout(function () { el.classList.remove('kpi-value-changing'); }, 360);
+        }
     }
 
     function attachValueObservers() {
         document.querySelectorAll('.kpi-value, .kpi-hourly-title').forEach(function (el) {
             if (observedValues.has(el)) return;
             observedValues.add(el);
+            el.__kpiPulseText = el.textContent;
             var obs = new MutationObserver(function () { pulseValue(el); });
             obs.observe(el, { childList: true, characterData: true, subtree: true });
         });

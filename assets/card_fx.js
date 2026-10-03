@@ -48,6 +48,7 @@
 
   var plateHoverKey = "";
   var plateFocusKey = "";
+  window._flowPlateFocusKey = "";
   var plateFocusLabel = "";
   var plateFocusColor = "";
   var plateFocusPill = null;
@@ -199,6 +200,8 @@
     lastScrolledPlateKey = "";
     applyPlateVisualState();
     if (oldKey) {
+      window._flowPlateFocusKey = "";
+      window.dispatchEvent(new CustomEvent("flow:plate-focus", { detail: { key: "" } }));
       requestAnimationFrame(function () {
         var active = document.activeElement;
         var card = active && active.closest && active.closest(".truck-sidebar-card[data-plate-key]");
@@ -220,6 +223,8 @@
     plateFocusColor = info.color || "#8b949e";
     plateHoverKey = "";
     applyPlateVisualState();
+    window._flowPlateFocusKey = plateFocusKey;
+    window.dispatchEvent(new CustomEvent("flow:plate-focus", { detail: { key: plateFocusKey } }));
     pulsePlateMatches(plateFocusKey);
   }
 

@@ -238,7 +238,7 @@
   }
 
   function startQueuedCountUp(el) {
-    if (!el) return;
+    if (!el || !el.isConnected || (window.__kpiActiveSubview && window.__kpiActiveSubview() !== "tracking")) return;
     var target = asNumber(el.__kpiCountTarget);
     var fmt = el.__kpiCountFmt || "kg";
     var delay = Math.max(0, el.__kpiCountDelay || 0);
@@ -262,6 +262,7 @@
       var start = null;
       var dur = fmt === "unit" ? 780 : 920;
       function step(ts) {
+        if (!el.isConnected || (window.__kpiActiveSubview && window.__kpiActiveSubview() !== "tracking")) { el.__kpiCountRaf = 0; return; }
         if (start === null) start = ts;
         var p = Math.min(1, (ts - start) / dur);
         var eased = 1 - Math.pow(1 - p, 3);
@@ -427,6 +428,102 @@
   var lastTrackingSig = "";    // tracking payload fingerprint → skip the 14-card DOM rebuild
   var lastKpiReplayAt = 0;
   var replayKpiTimer = 0;
+  // One latest payload is enough to reconstruct a page after releasing its DOM.
+  // Selections remain in the existing module state, rather than detached nodes.
+  var latestPagePayload = null;
+  var mountedSubview = null;
+  var lifecycleTimer = 0;
+  var trackingMountGeneration = 0;
+
+  window.__kpiActiveSubview = function () {
+    if (document.hidden || !document.body || !document.body.classList.contains("view-kpi-mode")) return null;
+    return document.body.classList.contains("kpi-sub-report") ? "report" : "tracking";
+  };
+  var trackingHostIds = ["kpi-page-inbound-chart", "kpi-page-outbound-chart", "kpi-flow-day-chart", "kpi-tracking-summary", "kpi-tracking-detail"];
+  window.__stopKpiWork = function (root) {
+    if (!root) return;
+    [root].concat(Array.prototype.slice.call(root.querySelectorAll("*"))).forEach(function (node) {
+      ["__kpiCountRaf", "__flowSummaryRaf", "__kpiShiftRevealRaf", "__kpiDayRevealRaf", "__kpiDetailRaf", "__temuRaf", "__kpiBandsRaf", "__kpiTrendRevealRaf"].forEach(function (key) {
+        if (node[key]) cancelAnimationFrame(node[key]);
+        node[key] = 0;
+      });
+      ["__kpiCountTimer", "__flowDaySolidTimer", "__kpiTrendMorphTimer", "__kpiTrendMorphCleanup", "__kpiAreaTimer", "__kpiStageTimer"].forEach(function (key) {
+        if (node[key]) clearTimeout(node[key]);
+        node[key] = 0;
+      });
+    });
+  };
+  window.__clearKpiHosts = function (ids) {
+    ids.forEach(function (id) {
+      var host = document.getElementById(id);
+      if (!host || !host.__kpiJsOwned) return;
+      window.__stopKpiWork(host);
+      host.innerHTML = "";
+    });
+  };
+  window.__markKpiHosts = function (ids) {
+    ids.forEach(function (id) { var host = document.getElementById(id); if (host) host.__kpiJsOwned = true; });
+  };
+
+  function unmountTracking() {
+    trackingMountGeneration += 1;
+    window.__stopKpiWork(document.querySelector(".kpi-subpage-tracking"));
+    [countObserver, pageChartObserver, trackingObserver].forEach(function (observer) { if (observer) observer.disconnect(); });
+    countObserver = pageChartObserver = trackingObserver = null;
+    clearTimeout(replayKpiTimer);
+    clearTimeout(trackingCloseTimer);
+    replayKpiTimer = trackingCloseTimer = null;
+    var section = document.querySelector(".kpi-tracking-section");
+    if (section) {
+      clearTimeout(section.__kpiOpeningTimer);
+      section.classList.remove("is-opening", "kpi-reveal-pending");
+    }
+    window.__clearKpiHosts(trackingHostIds);
+    if (window.__unmountKpiBands) window.__unmountKpiBands();
+    flowRenderSig = {};
+    flowChartStartedSig = {};
+    flowChartPendingSig = {};
+    flowDayRenderSig = "";
+    lastTrackingSig = "";
+    trackingLastValueSig = "";
+    countLastByKey = {};
+    trackingOpened = trackingRevealPending = false;
+    flowDayTransitioning = false;
+  }
+
+  function applyPagePayload() {
+    var active = window.__kpiActiveSubview();
+    if (mountedSubview && mountedSubview !== active) {
+      if (mountedSubview === "tracking") unmountTracking();
+      else {
+        if (window.__unmountKpiTrend) window.__unmountKpiTrend();
+        if (window.__unmountKpiTemu) window.__unmountKpiTemu();
+      }
+      mountedSubview = null;
+    }
+    if (!active || !latestPagePayload) return;
+    var payload = latestPagePayload;
+    var updated = document.getElementById("kpi-page-updated");
+    if (updated) updated.textContent = payload.updated ? ("Updated: " + payload.updated) : "";
+    if (active === "tracking") {
+      renderFlow("inbound", payload.inbound);
+      renderFlow("outbound", payload.outbound);
+      renderDayFlow(payload.time_bands, false);
+      syncFlowModeControls();
+      renderTracking(payload.tracking);
+      window.__markKpiHosts(trackingHostIds);
+      if (window.__renderKpiBands) window.__renderKpiBands(payload.time_bands);
+    } else {
+      if (window.__renderKpiTrend) window.__renderKpiTrend(payload.trend, payload.updated);
+      if (window.__renderKpiTemu) window.__renderKpiTemu(payload.temu_stages);
+    }
+    mountedSubview = active;
+  }
+
+  function schedulePageLifecycle() {
+    clearTimeout(lifecycleTimer);
+    lifecycleTimer = setTimeout(function () { lifecycleTimer = 0; applyPagePayload(); }, 0);
+  }
 
   function prefersReducedMotion() {
     return window.matchMedia &&
@@ -942,6 +1039,7 @@
   }
 
   function animateDayFlow(host) {
+    var mountGeneration = trackingMountGeneration;
     var rects = host.querySelectorAll(".kpi-flow-day-reveal");
     if (!rects.length || prefersReducedMotion()) {
       solidifyDayFlow(host);
@@ -962,20 +1060,24 @@
     function reveal(rect, duration) {
       var start = 0;
       function step(ts) {
+        if (!rect.isConnected || window.__kpiActiveSubview() !== "tracking") { rect.__kpiDayRevealRaf = 0; return; }
         if (!start) start = ts;
         var p = Math.min(1, (ts - start) / duration);
         var eased = 1 - Math.pow(1 - p, 4);
         rect.setAttribute("width", ((SVG_W - PAD_L) * eased).toFixed(2));
-        if (p < 1) requestAnimationFrame(step);
+        if (p < 1) rect.__kpiDayRevealRaf = requestAnimationFrame(step);
         else rect.setAttribute("width", String(SVG_W - PAD_L));
       }
-      requestAnimationFrame(step);
+      rect.__kpiDayRevealRaf = requestAnimationFrame(step);
     }
     setTimeout(function () {
+      if (mountGeneration !== trackingMountGeneration || window.__kpiActiveSubview() !== "tracking") return;
       var inbound = host.querySelector(".kpi-flow-day-reveal.inbound");
       var outbound = host.querySelector(".kpi-flow-day-reveal.outbound");
       if (inbound) reveal(inbound, 1580);
-      if (outbound) setTimeout(function () { reveal(outbound, 1720); }, 420);
+      if (outbound) setTimeout(function () {
+        if (mountGeneration === trackingMountGeneration && outbound.isConnected) reveal(outbound, 1720);
+      }, 420);
       host.__flowDaySolidTimer = setTimeout(function () {
         host.__flowDaySolidTimer = 0;
         solidifyDayFlow(host);
@@ -1878,14 +1980,15 @@
       if (!animate || reduce || target === 0) { el.textContent = formatCU(target, fmt); return; }
       var dur = 720, start = null;
       function step(ts) {
+        if (!el.isConnected || window.__kpiActiveSubview() !== "tracking") { el.__kpiDetailRaf = 0; return; }
         if (start === null) start = ts;
         var t = Math.min(1, (ts - start) / dur);
         var eased = 1 - Math.pow(1 - t, 3);
         el.textContent = formatCU(target * eased, fmt);
-        if (t < 1) requestAnimationFrame(step);
+        if (t < 1) el.__kpiDetailRaf = requestAnimationFrame(step);
         else el.textContent = formatCU(target, fmt);
       }
-      requestAnimationFrame(step);
+      el.__kpiDetailRaf = requestAnimationFrame(step);
     });
   }
 
@@ -2087,7 +2190,7 @@
   }
 
   function revealTrackingSection(section) {
-    if (!section) return;
+    if (!section || window.__kpiActiveSubview() !== "tracking") return;
     trackingRevealPending = false;
     if (trackingOpened) {
       section.classList.remove("kpi-reveal-pending");
@@ -2119,6 +2222,7 @@
   }
 
   function armTrackingReveal() {
+    if (window.__kpiActiveSubview() !== "tracking") return;
     var section = document.querySelector(".kpi-tracking-section");
     var summary = document.getElementById("kpi-tracking-summary");
     if (!section || !summary) return;
@@ -2536,16 +2640,8 @@
 
   window.__renderKpiPageCharts = function (payload) {
     if (!payload) return;
-    var updated = document.getElementById("kpi-page-updated");
-    if (updated) updated.textContent = payload.updated ? ("Updated: " + payload.updated) : "";
-    renderFlow("inbound", payload.inbound);
-    renderFlow("outbound", payload.outbound);
-    renderDayFlow(payload.time_bands, false);
-    syncFlowModeControls();
-    renderTracking(payload.tracking);
-    if (window.__renderKpiTrend) window.__renderKpiTrend(payload.trend, payload.updated);
-    if (window.__renderKpiTemu) window.__renderKpiTemu(payload.temu_stages);
-    if (window.__renderKpiBands) window.__renderKpiBands(payload.time_bands);
+    latestPagePayload = payload;
+    applyPagePayload();
   };
 
   // Re-play the opening animations (line draw-on, kg count-up, tracking reveal)
@@ -2555,6 +2651,7 @@
   // next render redraw the lines instead of snapping them solid — so the opening
   // plays on a plain page switch, not only after a data refresh.
   function replayKpiPageOpening() {
+    if (window.__kpiActiveSubview() !== "tracking") return;
     var now = Date.now();
     if (now - lastKpiReplayAt < 1800) return;
     lastKpiReplayAt = now;
@@ -2572,10 +2669,23 @@
     if (trackingPayload) armTrackingReveal();
   }
   window.addEventListener("kpi-view-entered", function () {
+    schedulePageLifecycle();
     if (replayKpiTimer) clearTimeout(replayKpiTimer);
     replayKpiTimer = setTimeout(function () {
       replayKpiTimer = 0;
       replayKpiPageOpening();
     }, 60);
   });
+  window.addEventListener("kpi-subview-shown", schedulePageLifecycle);
+  document.addEventListener("visibilitychange", schedulePageLifecycle);
+  function attachPageLifecycle() {
+    if (!document.body || typeof MutationObserver === "undefined") return;
+    var previous = window.__kpiActiveSubview();
+    new MutationObserver(function () {
+      var active = window.__kpiActiveSubview();
+      if (active !== previous) { previous = active; schedulePageLifecycle(); }
+    }).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attachPageLifecycle, { once: true });
+  else attachPageLifecycle();
 })();
