@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from shared_json import read_dict_for_write
 from storage_manager import _shared_base_dir
 
 log = logging.getLogger(__name__)
@@ -148,7 +149,8 @@ def _release_lock():
 def _locked_data():
     _acquire_lock()
     try:
-        data = _read_unlocked()
+        raw = read_dict_for_write(_path(), "Felülbírálások")
+        data = {k: v for k, v in raw.items() if isinstance(v, dict)}
         yield data
         _atomic_write(data)
         _cache["mtime"] = None

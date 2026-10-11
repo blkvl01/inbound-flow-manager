@@ -74,7 +74,7 @@ class SourceOpenTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/sources/open', json={'kind': 'ecomm', 'test_mode': 'true'}).status_code, 400)
 
     def test_t_mode_missing_real_source_is_error_and_oracle_stays_guarded(self):
-        with patch.object(app, 'ECOMM_FILE', 'missing-original.xlsb'), patch.object(app.oracle_ecomm, 'get_source_mode', return_value='excel'), patch.object(source_open.os, 'startfile') as launch:
+        with patch.object(app, 'ECOMM_FILE', 'missing-original.xlsb'), patch.object(app.oracle_ecomm, 'get_source_mode', return_value='excel'), patch.object(source_open.os, 'startfile', create=True) as launch:
             response = self.client.post('/api/sources/open', json={'kind': 'ecomm', 'test_mode': True})
             self.assertEqual(response.status_code, 400)
             self.assertFalse(response.get_json()['ok'])

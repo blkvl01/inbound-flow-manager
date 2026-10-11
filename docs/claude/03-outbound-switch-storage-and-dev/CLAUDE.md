@@ -112,11 +112,19 @@ Lock:
 - timeout: 15s
 - stale lock: 120s után törölhető
 - atomic write temp fájllal + `os.replace`
+- írás előtti olvasás `shared_json.read_dict_for_write`: ha a közös JSON létezik,
+  de nem olvasható (félkész OneDrive csere / sérült fájl), pár újrapróbálás után
+  `.corrupt.<ts>` másolat készül és a mentés **elmarad** (`SharedStateUnreadableError`).
+  Soha nem írhat üres állapotot a többi user bejegyzései fölé. Ugyanez érvényes a
+  megjegyzésekre és a dev felülbírálásokra.
 
 Működés:
 
 1. User rákattint: `Betárolva`.
-2. `storage_manager.toggle_stored()` írja/törli a közös JSON-t.
+2. `storage_manager.set_stored(awb, row, stored)` a gomb renderelt állapotából
+   (`badge-stored-empty` → betárol, `badge-stored-active` → visszavesz) a **kért
+   célállapotot** állítja be idempotensen. Nem vak toggle: egy elavult kártyán tett
+   kattintás nem fordíthatja vissza egy másik user ugyanilyen műveletét.
 3. `data_cache.update_stored_flags()` újraolvasás nélkül frissíti a DataFrame-et.
 4. A kártya eltűnik aktív nézetből.
 5. A kapcsolódó GLABS progress és dropdown azonnal frissül.

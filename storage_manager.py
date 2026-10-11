@@ -26,6 +26,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from shared_json import read_dict_for_write
+
 log = logging.getLogger(__name__)
 
 _LOCK_TIMEOUT_S = 15.0
@@ -182,7 +184,7 @@ def _release_lock():
 def _locked_data():
     _acquire_lock()
     try:
-        data = _read_unlocked()
+        data = read_dict_for_write(_path(), "Betárolva")
         yield data
         _atomic_write(data)
     finally:
@@ -296,6 +298,47 @@ def toggle_stored(awb: str, row: dict) -> tuple[bool, set]:
             is_now_stored = True
             log.info("Betarolva: %s", awb)
         return is_now_stored, set(data.keys())
+
+
+def set_stored(awb: str, row: dict, stored: bool) -> tuple[bool, set]:
+    """Idempotently put one AWB into the requested stored state.
+
+    Unlike toggle_stored, a click made on a stale card (another user already
+    applied the same change) does not reverse that change.
+    Returns (changed, all_stored_awbs_after_write).
+    """
+    changed = False
+    with _locked_data() as data:
+        if stored and awb not in data:
+            data[awb] = {
+                "stored_at": datetime.now().isoformat(),
+                "stored_by": os.environ.get("USERNAME", "unknown"),
+                "stored_on": socket.gethostname(),
+                "snapshot": _to_snapshot(row),
+            }
+            changed = True
+            log.info("Betarolva: %s", awb)
+        elif not stored and awb in data:
+            del data[awb]
+            changed = True
+            log.info("Visszarakva: %s", awb)
+        return changed, set(data.keys())
+
+
+def mark_many_unstored(awbs) -> int:
+    """Remove several AWBs in one locked shared-state write. Returns the count."""
+    targets = {str(a or "").strip() for a in (awbs or ())} - {""}
+    if not targets:
+        return 0
+    removed = 0
+    with _locked_data() as data:
+        for awb in targets:
+            if awb in data:
+                del data[awb]
+                removed += 1
+    if removed:
+        log.info("Visszarakva (kiadva): %s tetel", removed)
+    return removed
 
 
 def get_snapshot_rows(exclude_awbs: set) -> list[dict]:
