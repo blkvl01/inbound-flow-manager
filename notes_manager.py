@@ -58,9 +58,16 @@ def compact() -> int:
 
 
 def get_all_notes() -> dict:
-    """All live notes keyed by AWB, oldest first. Cached on the files' signature."""
+    """All live notes keyed by AWB, oldest first. Rebuilt only when any
+    machine's notes file changes; treat the result as read-only."""
+    return _ledger.view("by_awb", _group_by_awb)
+
+
+def _group_by_awb(records: dict) -> dict:
     grouped: dict = {}
-    for note_id, rec in _ledger.live().items():
+    for note_id, rec in records.items():
+        if rec.get("deleted"):
+            continue
         awb = str(rec.get("awb") or "")
         if not awb:
             continue

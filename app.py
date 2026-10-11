@@ -10309,6 +10309,7 @@ if __name__ == "__main__":
     print("  [2/2] Adatcache + webszerver indítása...", flush=True)
 
     data_cache.start()
+    updater.start_health_probe_from_arguments(PORT)
     updater.start_async()
     threading.Thread(target=_open_browser,        daemon=True).start()
     threading.Thread(target=_shutdown_watchdog,   daemon=True, name="InactivityWatchdog").start()

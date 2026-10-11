@@ -42,6 +42,10 @@ _LOCK_POLL_S = 0.20
 _LOCK_STALE_S = 120.0
 _FORMAT_VERSION = 1
 _TOMBSTONE_RETENTION = timedelta(days=14)
+# A render asks the ledger once per card; re-listing and stat-ing the shared
+# folder each time is wasted I/O. Other machines' changes arrive via OneDrive
+# seconds later anyway, and this machine's own writes invalidate immediately.
+_SIGNATURE_TTL_S = 1.0
 
 
 def _host() -> str:
@@ -75,6 +79,10 @@ class Ledger:
         self._file_cache: dict[str, tuple[tuple, dict]] = {}
         self._merged_sig = None
         self._merged: dict = {}
+        self._sig_cache: tuple[float, tuple] | None = None
+        # Bumped whenever the merged view changes; managers key derived views on it.
+        self.version = 0
+        self._views: dict[str, tuple[int, object]] = {}
 
     # ── paths ──────────────────────────────────────────────────────────────
     def own_path(self) -> Path:
@@ -101,8 +109,26 @@ class Ledger:
             log.warning("%s ledger listing failed: %s", self.name, exc)
         return paths
 
-    def signature(self) -> tuple:
-        """Changes whenever any machine's file (or the legacy file) changes."""
+    def signature(self, max_age: float = _SIGNATURE_TTL_S) -> tuple:
+        """Changes whenever any machine's file (or the legacy file) changes.
+
+        Reused for ``max_age`` seconds; pass 0 for a fresh filesystem check.
+        """
+        now = time.monotonic()
+        base = str(self._base_dir())
+        cached = self._sig_cache
+        if (max_age > 0 and cached is not None and cached[1][:1] == (base,)
+                and now - cached[0] < max_age):
+            return cached[1]
+        sig = self._fresh_signature()
+        self._sig_cache = (now, sig)
+        return sig
+
+    def _invalidate(self) -> None:
+        self._merged_sig = None
+        self._sig_cache = None
+
+    def _fresh_signature(self) -> tuple:
         sig = [str(self._base_dir())]
         for p in self.source_paths():
             try:
@@ -168,7 +194,19 @@ class Ledger:
             sources = [(p.name, self._read_source(p)) for p in self.source_paths()]
             self._merged = self._merge(sources)
             self._merged_sig = sig
+            self.version += 1
             return self._merged
+
+    def view(self, name: str, build: Callable[[dict], object]):
+        """A derived view of the merged records, rebuilt only when they change."""
+        with self._mutex:
+            records = self.records()
+            cached = self._views.get(name)
+            if cached is not None and cached[0] == self.version:
+                return cached[1]
+            value = build(records)
+            self._views[name] = (self.version, value)
+            return value
 
     def live(self) -> dict:
         return {k: v for k, v in self.records().items() if not v.get("deleted")}
@@ -238,7 +276,7 @@ class Ledger:
                 yield txn
                 if txn.dirty:
                     self._write_own(own)
-                    self._merged_sig = None
+                    self._invalidate()
             finally:
                 self._release_lock()
 
@@ -271,7 +309,7 @@ class Ledger:
                         removed += 1
                 if removed:
                     self._write_own(own)
-                    self._merged_sig = None
+                    self._invalidate()
                     log.info("%s ledger compacted: %d record", self.name, removed)
             finally:
                 self._release_lock()

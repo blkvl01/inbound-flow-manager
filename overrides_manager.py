@@ -85,9 +85,16 @@ def compact() -> int:
 
 
 def get_all_overrides() -> dict:
-    """All overrides keyed by AWB: {awb: {"fields": {...}, "set_by", "set_on", "set_at"}}."""
+    """All overrides keyed by AWB: {awb: {"fields": {...}, "set_by", "set_on", "set_at"}}.
+    Rebuilt only when any machine's overrides file changes; treat as read-only."""
+    return _ledger.view("by_awb", _group_by_awb)
+
+
+def _group_by_awb(records: dict) -> dict:
     grouped: dict = {}
-    for rec in _ledger.live().values():
+    for rec in records.values():
+        if rec.get("deleted"):
+            continue
         awb, field = str(rec.get("awb") or ""), str(rec.get("field") or "")
         if not awb or not field:
             continue
