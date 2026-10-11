@@ -262,6 +262,25 @@ GitHub Release csomag:
 - A közös `_shared_state/` és a OneDrive-ban tárolt Excel-fájlok nem részei a
   kiadásnak, nem kerülnek felülírásra.
 
+Automatikus frissítés és visszaállás (`updater.py`):
+
+- A helper a csere előtt a futó EXE-t `FlowManager.prev.exe` néven megtartja
+  (az előző sikeres frissítésig visszamenőleg kézi visszaállásra is jó).
+- Az új verzió `--flow-manager-update-probe <fájl>` argumentummal indul; amint a
+  saját szervere kiszolgálja a `/_dash-layout`-ot (loopback, proxy nélkül), megírja
+  a jelzőfájlt.
+- Visszaállás **csak összeomlásnál**: ha az új verzió nem nulla kóddal kilép, mielőtt
+  a layoutot egyszer is kiszolgálta. Ekkor a helper leállítja a folyamatfát
+  (`taskkill /T`), visszaállítja a `.prev` EXE-t és újraindítja.
+- A lassú indulás nem hiba (OneDrive-várakozás, mappaválasztó ablak): a helper legfeljebb
+  30 percig figyel, futó folyamatot nem állít le. Szabályos (0-s kódú) kilépés, pl. a
+  felhasználó bezárta, sem vált ki visszaállást. Egy induláskor lefagyó (nem kilépő)
+  verziót ezért nem állít vissza automatikusan; erre a `.prev` EXE kézi visszamásolása való.
+- A sikertelen csomag SHA-256 hash-e a `%LOCALAPPDATA%\FlowManager\bad_updates.json`-ba
+  kerül; az updater ezt a csomagot többé nem tölti le (egy újabb kiadás új hash-sel
+  ismét próbálkozik). Kézi újrapróba: a bejegyzés törlése.
+- Napló: `%LOCALAPPDATA%\FlowManager\frissites.log`.
+
 ---
 
 ## Ellenőrzési parancsok

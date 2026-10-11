@@ -416,14 +416,33 @@ def update_stored_flags(stored_awbs: set[str] | None = None):
     Overrides are re-applied first (they restore/replace base fields), so a
     dev-menu override change goes through the same instant path.
     """
-    stored = stored_awbs if stored_awbs is not None else storage_manager.get_stored_awbs()
-    with _lock:
-        df = _state["df"]
-        if df is not None and not df.empty:
-            df = overrides_manager.apply_overrides_to_df(df)
-            df = _apply_stored_state(df, stored)
-            _state["df"] = apply_priorities(df)
-        _state["data_version"] += 1
+    # The pandas/priority work runs outside the global state lock so UI reads
+    # are never blocked by it. Flag updates are serialised among themselves and
+    # always use the freshest stored set (the caller's set may already be older
+    # than a concurrent click's write), so no update can publish stale flags.
+    with _flags_lock:
+        stored = storage_manager.get_stored_awbs()
+        for _attempt in range(3):
+            with _lock:
+                base = _state["df"]
+            updated = None
+            if base is not None and not base.empty:
+                df = overrides_manager.apply_overrides_to_df(base)
+                df = _apply_stored_state(df, stored)
+                updated = apply_priorities(df)
+            with _lock:
+                if _state["df"] is base:
+                    if updated is not None:
+                        _state["df"] = updated
+                    _state["data_version"] += 1
+                    return
+            # A full refresh replaced the data meanwhile (it may have read the
+            # shared state before this change): recompute on the new data.
+        with _lock:
+            _state["data_version"] += 1
+
+
+_flags_lock = threading.Lock()
 
 
 _refresh_event = threading.Event()

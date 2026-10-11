@@ -313,3 +313,81 @@ class ForeignPostRejectedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoredFlagsConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        with data_cache._lock:
+            self.saved_state = dict(data_cache._state)
+
+    def tearDown(self):
+        with data_cache._lock:
+            data_cache._state.clear()
+            data_cache._state.update(self.saved_state)
+
+    def test_ui_reads_are_not_blocked_while_flags_recompute(self):
+        import threading
+        df = pd.DataFrame([{"awb": "A"}])
+        with data_cache._lock:
+            data_cache._state["df"] = df
+        started, release = threading.Event(), threading.Event()
+
+        def slow_priorities(d):
+            started.set()
+            release.wait(5)
+            return d
+
+        with mock.patch.object(data_cache, "apply_priorities", side_effect=slow_priorities), \
+                mock.patch.object(data_cache, "_apply_stored_state", side_effect=lambda d, s: d), \
+                mock.patch.object(data_cache.overrides_manager, "apply_overrides_to_df", side_effect=lambda d: d), \
+                mock.patch.object(data_cache.storage_manager, "get_stored_awbs", return_value=set()):
+            worker = threading.Thread(target=data_cache.update_stored_flags)
+            worker.start()
+            self.assertTrue(started.wait(5))
+            acquired = data_cache._lock.acquire(timeout=1)
+            self.assertTrue(acquired, "global state lock must be free during the recompute")
+            data_cache._lock.release()
+            release.set()
+            worker.join(5)
+
+    def test_recomputes_on_data_replaced_by_a_refresh_meanwhile(self):
+        old, new = pd.DataFrame([{"awb": "OLD"}]), pd.DataFrame([{"awb": "NEW"}])
+        with data_cache._lock:
+            data_cache._state["df"] = old
+        calls = []
+
+        def priorities(d):
+            calls.append(d["awb"].iloc[0])
+            if len(calls) == 1:
+                with data_cache._lock:
+                    data_cache._state["df"] = new  # a full refresh lands mid-recompute
+            return d.assign(flagged=True)
+
+        with mock.patch.object(data_cache, "apply_priorities", side_effect=priorities), \
+                mock.patch.object(data_cache, "_apply_stored_state", side_effect=lambda d, s: d), \
+                mock.patch.object(data_cache.overrides_manager, "apply_overrides_to_df", side_effect=lambda d: d), \
+                mock.patch.object(data_cache.storage_manager, "get_stored_awbs", return_value=set()):
+            data_cache.update_stored_flags()
+        self.assertEqual(calls, ["OLD", "NEW"])
+        result = data_cache.get_state()["df"]
+        self.assertEqual(result["awb"].tolist(), ["NEW"])
+        self.assertTrue(result["flagged"].all())
+
+
+class LedgerReadCacheTests(SharedStateDirMixin, unittest.TestCase):
+    def test_card_lookups_do_not_relist_the_shared_folder(self):
+        notes_manager.add_note("AWB", "x")
+        notes_manager.get_notes("AWB")
+        ledger = notes_manager._ledger
+        with mock.patch.object(ledger, "_fresh_signature", wraps=ledger._fresh_signature) as fresh:
+            for _ in range(50):
+                notes_manager.get_notes("AWB")
+        self.assertLessEqual(fresh.call_count, 1)
+
+    def test_own_write_is_visible_immediately_despite_cache(self):
+        self.assertEqual(notes_manager.get_notes("AWB"), [])
+        notes_manager.add_note("AWB", "uj")
+        self.assertEqual([n["text"] for n in notes_manager.get_notes("AWB")], ["uj"])
+        storage_manager.get_stored_awbs()
+        storage_manager.set_stored("S", {}, True)
+        self.assertEqual(storage_manager.get_stored_awbs(), {"S"})

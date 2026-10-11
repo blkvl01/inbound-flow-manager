@@ -141,7 +141,8 @@ def _from_snapshot(snap: dict) -> dict:
 
 
 def get_stored_awbs() -> set:
-    return set(_ledger.live().keys())
+    return set(_ledger.view("stored_awbs", lambda recs: frozenset(
+        k for k, v in recs.items() if not v.get("deleted"))))
 
 
 def is_stored(awb: str) -> bool:

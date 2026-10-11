@@ -31,6 +31,7 @@ from version import APP_NAME, APP_VERSION, GITHUB_REPOSITORY, PACKAGE_NAME
 MANIFEST_NAME = "manifest.json"
 HELPER_ARG = "--flow-manager-update-helper"
 CLEANUP_HELPER_ARG = "--flow-manager-cleanup-helper"
+HEALTH_PROBE_ARG = "--flow-manager-update-probe"
 API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 LATEST_MANIFEST_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/{MANIFEST_NAME}"
 LATEST_PACKAGE_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/{PACKAGE_NAME}"
@@ -42,6 +43,13 @@ _DOWNLOAD_ATTEMPTS = 3
 _STALE_STAGE_AGE_S = 2 * 60 * 60.0
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _HELPER_NAME_RE = re.compile(r"^FlowManager-update-helper-\d+-[0-9a-f]{12}\.exe$")
+_PROBE_NAME_RE = re.compile(r"^probe-\d+-[0-9a-f]{12}\.ok$")
+# After the swap the helper watches the new version for this long. It rolls
+# back only on a crash (non-zero exit before the Dash layout was ever served).
+# A slow start is NOT a failure: startup can legitimately wait on OneDrive or a
+# folder-picker dialog, so a still-running process is never killed.
+_HEALTH_TIMEOUT_S = 30 * 60.0
+_HEALTH_POLL_S = 0.5
 _SEMVER_RE = re.compile(
     r"^v?(?P<core>\d+(?:\.\d+)*)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
 )
@@ -245,11 +253,45 @@ def check_for_update(
     *,
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Return release metadata only when it is strictly newer."""
+    """Return release metadata only when it is strictly newer and not a
+    package that already failed its post-update health check here."""
     release = _load_release(opener)
     if compare_versions(release["version"], current_version) <= 0:
         return None
+    if release["manifest"]["package"]["sha256"].lower() in _load_bad_digests():
+        _set_status("ready", f"A {release['version']} verzió korábban nem indult el, kihagyva", 100,
+                    available_version=release["version"])
+        return None
     return release
+
+
+def _bad_updates_path() -> Path:
+    return _helper_dir().parent / "bad_updates.json"
+
+
+def _load_bad_digests() -> set[str]:
+    try:
+        data = json.loads(_bad_updates_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(k).lower() for k in data} if isinstance(data, dict) else set()
+
+
+def _mark_bad_digest(digest: str, reason: str) -> None:
+    """Remember a package that failed after install so it is not retried."""
+    path = _bad_updates_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[str(digest).lower()] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        _log_helper(f"A hibás csomag megjelölése sikertelen: {exc}")
 
 
 def _hash_file(path: Path, progress: Callable[[int], None] | None = None) -> tuple[int, str]:
@@ -474,7 +516,8 @@ def schedule_helper_cleanup_from_arguments(argv: list[str] | None = None) -> Non
         return
 
     def remove_after_exit() -> None:
-        for _ in range(60):
+        # The helper stays alive during the post-update health check.
+        for _ in range(int(_HEALTH_TIMEOUT_S) + 120):
             try:
                 candidate.unlink(missing_ok=True)
                 return
@@ -484,8 +527,69 @@ def schedule_helper_cleanup_from_arguments(argv: list[str] | None = None) -> Non
     threading.Thread(target=remove_after_exit, name="UpdateHelperCleanup", daemon=True).start()
 
 
+def backup_path(target: Path) -> Path:
+    """The previous executable kept next to the target after an update."""
+    return target.with_name(f"{target.stem}.prev{target.suffix}")
+
+
+def _replace_with_retry(source: Path, destination: Path, attempts: int = 60) -> OSError | None:
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return None
+        except OSError as exc:
+            if attempt == attempts - 1:
+                return exc
+            time.sleep(1)
+    return None
+
+
+def _launch_with_probe(target: Path, helper: Path | None, probe: Path) -> subprocess.Popen | None:
+    command = [str(target)]
+    if helper is not None:
+        command.extend((CLEANUP_HELPER_ARG, str(helper)))
+    command.extend((HEALTH_PROBE_ARG, str(probe)))
+    for attempt in range(3):
+        try:
+            return subprocess.Popen(command, cwd=str(target.parent), close_fds=True)
+        except OSError as exc:
+            _log_helper(f"Új verzió indítási kísérlet {attempt + 1}/3 sikertelen: {exc}")
+            time.sleep(1)
+    return None
+
+
+def _await_health(process: subprocess.Popen, probe: Path, timeout: float | None = None) -> str:
+    """Return "healthy", "crashed" (non-zero exit before serving), "closed"
+    (clean exit before serving, e.g. the user closed it) or "unconfirmed"."""
+    deadline = time.monotonic() + (_HEALTH_TIMEOUT_S if timeout is None else timeout)
+    while time.monotonic() < deadline:
+        if probe.exists():
+            return "healthy"
+        code = process.poll()
+        if code is not None:
+            if probe.exists():
+                return "healthy"
+            return "closed" if code == 0 else "crashed"
+        time.sleep(_HEALTH_POLL_S)
+    return "healthy" if probe.exists() else "unconfirmed"
+
+
+def _kill_tree(process: subprocess.Popen) -> None:
+    """Stop the new version, including the PyInstaller child process."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           capture_output=True, timeout=30)
+        else:
+            process.kill()
+        process.wait(timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def run_helper_cli(argv: list[str] | None = None) -> int:
-    """Wait for the parent, re-check the staged hash, replace, and restart."""
+    """Wait for the parent, re-check the staged hash, replace, verify, and
+    roll back to the previous executable when the new one does not come up."""
     args = list(argv or sys.argv)
     try:
         index = args.index(HELPER_ARG)
@@ -505,21 +609,80 @@ def run_helper_cli(argv: list[str] | None = None) -> int:
         _log_helper("A letöltött EXE ellenőrzése sikertelen; a korábbi verzió újraindul.")
         _restart_executable(target_path, helper_path)
         return 3
-    for attempt in range(60):
-        try:
-            os.replace(stage_path, target_path)
-            break
-        except OSError as exc:
-            if attempt == 59:
-                _log_helper(f"Az EXE cseréje sikertelen: {exc}; a korábbi verzió újraindul.")
-                _restart_executable(target_path, helper_path)
-                return 4
-            time.sleep(1)
-    _log_helper("Az EXE cseréje sikeres; az új verzió indul.")
+
+    previous = backup_path(target_path)
+    error = _replace_with_retry(target_path, previous)
+    if error is not None:
+        _log_helper(f"Az EXE cseréje sikertelen: {error}; a korábbi verzió újraindul.")
+        _restart_executable(target_path, helper_path)
+        return 4
+    error = _replace_with_retry(stage_path, target_path)
+    if error is not None:
+        restore_error = _replace_with_retry(previous, target_path)
+        _log_helper(f"Az EXE cseréje sikertelen: {error}; a korábbi verzió újraindul."
+                    + (f" Visszaállítási hiba: {restore_error}" if restore_error else ""))
+        _restart_executable(target_path, helper_path)
+        return 4
+    _log_helper("Az EXE cseréje sikeres; az új verzió indul, indulás ellenőrzése.")
+
+    probe = _helper_dir() / f"probe-{os.getpid()}-{os.urandom(6).hex()}.ok"
+    process = _launch_with_probe(target_path, helper_path, probe)
+    outcome = "crashed" if process is None else _await_health(process, probe)
+    if outcome != "crashed":
+        probe.unlink(missing_ok=True)
+        _log_helper({
+            "healthy": f"Az új verzió elindult; a korábbi megmaradt: {previous.name}",
+            "closed": "Az új verzió indulás közben szabályosan bezárult; nincs visszaállás.",
+            "unconfirmed": "Az új verzió fut, de az indulás nem igazolódott; nincs visszaállás.",
+        }[outcome])
+        return 0
+
+    reason = "nem indult el" if process is None else f"összeomlott indulás közben (kód: {process.poll()})"
+    _log_helper(f"Az új verzió {reason}; visszaállás a korábbi verzióra.")
+    if process is not None:
+        _kill_tree(process)
+    _mark_bad_digest(digest, reason)
+    error = _replace_with_retry(previous, target_path)
+    if error is not None:
+        _log_helper(f"A visszaállítás sikertelen: {error}. A korábbi EXE: {previous}")
+        return 8
+    probe.unlink(missing_ok=True)
     if not _restart_executable(target_path, helper_path):
-        _log_helper("Az új EXE nem indult el automatikusan.")
+        _log_helper("A korábbi EXE nem indult el automatikusan.")
         return 6
-    return 0
+    return 7
+
+
+def start_health_probe_from_arguments(port: int, argv: list[str] | None = None) -> threading.Thread | None:
+    """After an update, report a healthy start once the Dash layout is served."""
+    args = list(argv or sys.argv)
+    if HEALTH_PROBE_ARG not in args:
+        return None
+    index = args.index(HEALTH_PROBE_ARG)
+    if index + 1 >= len(args):
+        return None
+    probe = Path(args[index + 1]).resolve()
+    if probe.parent != _helper_dir().resolve() or not _PROBE_NAME_RE.fullmatch(probe.name):
+        return None
+
+    def wait_until_serving() -> None:
+        # Loopback only: never route the probe through a corporate proxy.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = f"http://127.0.0.1:{int(port)}/_dash-layout"
+        deadline = time.monotonic() + _HEALTH_TIMEOUT_S
+        while time.monotonic() < deadline:
+            try:
+                with opener.open(url, timeout=5) as response:
+                    if response.status == 200:
+                        probe.write_text("ok", encoding="utf-8")
+                        return
+            except (OSError, urllib.error.URLError):
+                pass
+            time.sleep(1)
+
+    thread = threading.Thread(target=wait_until_serving, name="UpdateHealthProbe", daemon=True)
+    thread.start()
+    return thread
 
 
 def run_startup_update(

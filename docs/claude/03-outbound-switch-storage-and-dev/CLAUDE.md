@@ -124,6 +124,16 @@ Formátum (`<name>.<GÉPNÉV>.json`):
 órájú gép sem „rejtheti el" a később tett műveletet. Félig szinkronizált másik gépes
 fájlnál az utolsó jó olvasat marad érvényben.
 
+Olvasási cache: a mappa listázása/stat-ja legfeljebb 1 mp-enként fut (`_SIGNATURE_TTL_S`),
+az összefésült nézet és a származtatott nézetek (betárolt halmaz, megjegyzések/felülbírálások
+AWB-nként, `Ledger.view`) csak tényleges fájlváltozáskor épülnek újra. A saját írás azonnal
+érvényteleníti a cache-t; más gép változása legfeljebb 1 mp késéssel látszik. A `get_all_notes`
+és `get_all_overrides` eredménye csak olvasható.
+
+`data_cache.update_stored_flags` a prioritásszámítást a globális állapotzáron **kívül**
+végzi (külön `_flags_lock` sorosítja), mindig a friss betárolt halmazzal; ha közben teljes
+frissítés cserélte az adatot, az újon számol újra.
+
 Tömörítés (`compact`, háttérfrissítésből óránként, csak a saját fájlon): törli a más
 forrás által felülírt saját rekordokat, és a 14 napnál régebbi tombstone-okat, ha
 már egyetlen más forrás sem tartja az adott kulcsot. Így nem támadhat fel törölt elem.
