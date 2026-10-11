@@ -1,24 +1,29 @@
+import os
+import shutil
+import tempfile
 import unittest
-from contextlib import contextmanager
 from datetime import datetime
-from unittest import mock
+from pathlib import Path
 
 import storage_manager
 
 
 class StorageManagerTests(unittest.TestCase):
     def setUp(self):
-        self.data = {}
-
-        @contextmanager
-        def fake_locked_data():
-            yield self.data
-
-        self.lock_patch = mock.patch.object(storage_manager, "_locked_data", fake_locked_data)
-        self.lock_patch.start()
+        self._old_shared = os.environ.get("FLOW_SHARED_STATE_DIR")
+        self.tmp = Path(tempfile.mkdtemp(prefix="flow_storage_"))
+        os.environ["FLOW_SHARED_STATE_DIR"] = str(self.tmp)
 
     def tearDown(self):
-        self.lock_patch.stop()
+        if self._old_shared is None:
+            os.environ.pop("FLOW_SHARED_STATE_DIR", None)
+        else:
+            os.environ["FLOW_SHARED_STATE_DIR"] = self._old_shared
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @property
+    def data(self):
+        return storage_manager.load_stored()
 
     def test_mark_many_stored_writes_new_awbs_in_one_call(self):
         count, stored = storage_manager.mark_many_stored({

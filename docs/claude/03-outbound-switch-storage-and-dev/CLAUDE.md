@@ -82,41 +82,65 @@ Korábbi hiba: néha beragadt a switch/filter, mert server callback késleltette
 
 Fájl: `storage_manager.py`
 
-Közös storage a meglévő OneDrive-mappában:
+Közös storage a meglévő OneDrive-mappában, **gépenkénti ledgerként**
+(`shared_ledger.py`, 2026-10):
 
 ```text
-Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.shared.json
-Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.shared.lock
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.<GÉPNÉV>.json   (csak az adott gép írja)
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.<GÉPNÉV>.lock   (gépen belüli zár)
+Ecommerce - Dokumentumok\Program HUB\Flow Manager\stored_awbs.shared.json     (régi, befagyasztott, csak olvasott)
 ```
 
 Angol OneDrive-mappanév esetén az `Ecommerce - Documents\Program HUB\Flow Manager`
 útvonal használható. A program ezt a közös mappát automatikusan keresi, és a
 korábban kiválasztott eltérő útvonalat induláskor felülírja.
 
-Formátum:
+Miért gépenként: a mappa helyben szinkronizált OneDrive mappa, ezért egy lock fájl
+csak az adott gépen belül zár ki. Egyetlen közös JSON két gépről írva elveszítette
+az egyik gép módosítását (az utoljára szinkronizált nyert) vagy `-<PC>` konfliktus-
+másolatot hozott létre. Most két gép soha nem ír ugyanabba a fájlba.
+
+Formátum (`<name>.<GÉPNÉV>.json`):
 
 ```json
 {
-  "<awb>": {
-    "stored_at": "<ISO datetime>",
-    "stored_by": "<user>",
-    "stored_on": "<computer>",
-    "snapshot": { "...row fields..." }
+  "version": 1,
+  "host": "<GÉPNÉV>",
+  "records": {
+    "<awb>": {
+      "stored_at": "<ISO>", "stored_by": "<user>", "stored_on": "<computer>",
+      "snapshot": { "...row fields..." },
+      "ts": "<ISO, mikroszekundum>",
+      "deleted": false
+    }
   }
 }
 ```
 
-Lock:
+Összefésülés: olvasáskor az összes gép fájlja + a régi `*.shared.json` (átállás előtti
+állapot, változatlanul megmarad) összeolvad; kulcsonként a legnagyobb `ts` nyer
+(egyezésnél a fájlnév dönt). Törlés = `deleted: true` tombstone, nem a rekord eltávolítása.
+Írásnál a `ts` mindig szigorúan nagyobb az aktuális nyertesnél, így egy előre siető
+órájú gép sem „rejtheti el" a később tett műveletet. Félig szinkronizált másik gépes
+fájlnál az utolsó jó olvasat marad érvényben.
 
-- lock fájl: `stored_awbs.shared.lock`
+Tömörítés (`compact`, háttérfrissítésből óránként, csak a saját fájlon): törli a más
+forrás által felülírt saját rekordokat, és a 14 napnál régebbi tombstone-okat, ha
+már egyetlen más forrás sem tartja az adott kulcsot. Így nem támadhat fel törölt elem.
+
+Átállás: régi verziót futtató gépek nem látják az új verziók műveleteit (és fordítva),
+ezért a frissítést egyszerre érdemes kiadni.
+
+Lock (gépen belül, több app-példány ellen):
+
+- lock fájl: `stored_awbs.<GÉPNÉV>.lock`
 - timeout: 15s
 - stale lock: 120s után törölhető
-- atomic write temp fájllal + `os.replace`
-- írás előtti olvasás `shared_json.read_dict_for_write`: ha a közös JSON létezik,
-  de nem olvasható (félkész OneDrive csere / sérült fájl), pár újrapróbálás után
-  `.corrupt.<ts>` másolat készül és a mentés **elmarad** (`SharedStateUnreadableError`).
-  Soha nem írhat üres állapotot a többi user bejegyzései fölé. Ugyanez érvényes a
-  megjegyzésekre és a dev felülbírálásokra.
+- atomic write temp fájllal + `fsync` + `os.replace`
+- a dev menü „Lock feloldás" csak a saját gép zárjait törli
+- a saját fájl írás előtti olvasása `shared_json.read_dict_for_write`: ha létezik,
+  de nem olvasható, pár újrapróbálás után `.corrupt.<ts>` másolat készül és a mentés
+  **elmarad** (`SharedStateUnreadableError`). Soha nem ír üres állapotot.
 
 Működés:
 
@@ -147,7 +171,9 @@ Manual stored extra:
 ## Megjegyzések (inbound kártyák)
 
 Fájl: `notes_manager.py`
-Közös storage: `_shared_state/item_notes.shared.json` + lock (storage_manager minta).
+Közös storage: gépenkénti ledger (`item_notes.<GÉPNÉV>.json`, lásd Betárolva), kulcs a
+megjegyzés `id`-ja, így két gép egyidejű hozzáadása/törlése sem ütközik. A régi
+`item_notes.shared.json` csak olvasott forrás.
 
 - Több megjegyzés gyűlhet AWB-nként listában; mindegyiknél `id, text, by, on, at`.
 - Csak az aktív INBOUND kártyákon van szerkesztő blokk (`_make_notes_block`),
@@ -157,7 +183,7 @@ Közös storage: `_shared_state/item_notes.shared.json` + lock (storage_manager 
 - Hozzáadás: input + Hozzáad gomb vagy Enter (`handle_note_action`, pattern-matching,
   `triggered_value` guard mint a store-btn-nél). Törlés: ✕ a megjegyzés sorában.
 - A `note-action` store Input az `update_dashboard`-nak → azonnali re-render;
-  más gépeken a file-watcher (notes mtime → `bump_data_version`) frissít.
+  más gépeken a file-watcher (összes gép fájljainak aláírása → `bump_data_version`) frissít.
 - Cleanup csak háttérfrissítéskor: az AWB már nem aktív/betárolt ÉS a legújabb
   megjegyzés 48 óránál régebbi (átmeneti Excel-hiba nem törölhet friss megjegyzést).
 - Max hossz: 280 karakter.
@@ -173,11 +199,11 @@ oldal-újratöltéskor újra kell PIN-t adni).
 Tabok:
 
 1. **Műveletek**: állapot-infó, kényszerített újraolvasás, dashboard cache törlés,
-   lock fájlok feloldása.
+   lock fájlok feloldása (csak a saját gép zárjai).
 2. **Állapotok**: Betárolva bejegyzések, megjegyzések, ULD stack-ek, átnevezések
    listája egyenkénti törléssel (`{"type": "dev-del", "kind": ..., "index": ...}`).
 3. **Felülbírálás**: per-AWB mező-felülbírálás (`overrides_manager.py`,
-   `_shared_state/item_overrides.shared.json`). Engedélyezett mezők:
+   gépenkénti ledger `item_overrides.<GÉPNÉV>.json`, rekord (AWB, mező) páronként). Engedélyezett mezők:
    `lmp, weight, boxes, cargo_type, uld_number, glabs_id, rendszam, is_shippable`.
    A pipeline-ban a stored-state ELŐTT, a priority engine előtt alkalmazódik
    (`apply_overrides_to_df`), `<mező>__orig` backup oszlopokkal — törléskor az

@@ -15,7 +15,6 @@ class OverridesManagerTests(unittest.TestCase):
         self._tmp = Path(__file__).resolve().parents[1] / "_codex_ovr_tests" / uuid.uuid4().hex
         self._tmp.mkdir(parents=True, exist_ok=True)
         os.environ["FLOW_SHARED_STATE_DIR"] = str(self._tmp)
-        overrides_manager._cache["mtime"] = None
 
     def tearDown(self):
         if self._old_shared is None:

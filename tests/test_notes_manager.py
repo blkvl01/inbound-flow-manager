@@ -14,7 +14,6 @@ class NotesManagerTests(unittest.TestCase):
         self._tmp = Path(__file__).resolve().parents[1] / "_codex_notes_tests" / uuid.uuid4().hex
         self._tmp.mkdir(parents=True, exist_ok=True)
         os.environ["FLOW_SHARED_STATE_DIR"] = str(self._tmp)
-        notes_manager._cache["mtime"] = None
 
     def tearDown(self):
         if self._old_shared is None:
@@ -66,8 +65,10 @@ class NotesManagerTests(unittest.TestCase):
         old = notes_manager.add_note("OLD-ORPHAN", "régi, törlődik")
 
         # age the orphan note past the 48h grace
-        with notes_manager._locked_data() as data:
-            data["OLD-ORPHAN"][0]["at"] = (datetime.now() - timedelta(hours=72)).isoformat()
+        with notes_manager._ledger.edit() as txn:
+            rec = dict(txn.live[old["id"]])
+            rec["at"] = (datetime.now() - timedelta(hours=72)).isoformat()
+            txn.put(old["id"], rec)
         self.assertIsNotNone(old)
 
         removed = notes_manager.cleanup_missing({"ACTIVE"}, {"STORED"})

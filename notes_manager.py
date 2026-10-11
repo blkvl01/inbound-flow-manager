@@ -1,162 +1,76 @@
 """
 Shared per-AWB notes for multi-user use (INBOUND cards).
 
-item_notes.shared.json format:
-  {
-    "<awb>": [
-      {
-        "id": "<short uuid>",
-        "text": "<note text>",
-        "by": "<username>",
-        "on": "<computer>",
-        "at": "<ISO datetime>"
-      },
-      ...
-    ]
-  }
+Stored as a per-machine ledger (see shared_ledger.py), keyed by note id so two
+machines adding or deleting notes at the same time never overwrite each other:
 
-Same shared-folder + lock mechanism as storage_manager (Betárolva).
+  item_notes.<HOST>.json  records: {"<note id>": {"awb": "...", "text": "...",
+      "by": "<user>", "on": "<computer>", "at": "<ISO>", "ts": "...", "deleted": false}}
+
+The frozen legacy ``item_notes.shared.json`` ({awb: [note, ...]}) is merged in.
 """
-import json
 import logging
 import os
 import socket
-import tempfile
-import time
 import uuid
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from shared_json import read_dict_for_write
+from shared_ledger import Ledger
 from storage_manager import _shared_base_dir
 
 log = logging.getLogger(__name__)
 
-_LOCK_TIMEOUT_S = 15.0
-_LOCK_POLL_S = 0.20
-_LOCK_STALE_S = 120.0
-
 MAX_NOTE_LEN = 280
-
-# mtime-keyed read cache so per-render reads stay cheap
-_cache: dict = {"mtime": None, "data": {}}
+_NOTE_KEYS = ("id", "text", "by", "on", "at")
 
 
-def _path() -> Path:
-    return _shared_base_dir() / "item_notes.shared.json"
+def _legacy_records(data: dict) -> dict:
+    records = {}
+    for awb, notes in data.items():
+        if not isinstance(notes, list):
+            continue
+        for seq, note in enumerate(notes):
+            if isinstance(note, dict) and note.get("id"):
+                records[str(note["id"])] = {**note, "awb": str(awb), "deleted": False,
+                                            "ts": note.get("at", ""), "seq": seq}
+    return records
 
 
-def _lock_path() -> Path:
-    return _shared_base_dir() / "item_notes.shared.lock"
+_ledger = Ledger("item_notes", lambda: _shared_base_dir(), _legacy_records)
 
 
 def get_notes_path() -> Path:
-    return _path()
+    """This machine's ledger file."""
+    return _ledger.own_path()
+
+
+def state_signature() -> tuple:
+    return _ledger.signature()
 
 
 def get_notes_mtime() -> float:
-    try:
-        return _path().stat().st_mtime
-    except OSError:
-        return 0.0
+    return max((entry[1] for entry in state_signature()[1:]), default=0) / 1e9
 
 
-def _read_unlocked() -> dict:
-    p = _path()
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return {k: v for k, v in data.items() if isinstance(v, list)}
-            log.warning("item_notes shared file is not a dict, ignoring: %s", p)
-        except Exception as exc:
-            log.error("item_notes shared read error: %s", exc)
-    return {}
-
-
-def _atomic_write(data: dict):
-    target = _path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=target.stem + ".", suffix=".tmp", dir=str(target.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-        try:
-            os.replace(tmp_name, target)
-        except OSError:
-            with open(target, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                f.flush()
-    finally:
-        try:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
-        except OSError:
-            pass
-
-
-def _acquire_lock(timeout_s: float = _LOCK_TIMEOUT_S):
-    lock = _lock_path()
-    deadline = time.time() + timeout_s
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "created_at": datetime.now().isoformat(),
-                    "user": os.environ.get("USERNAME", "unknown"),
-                    "host": socket.gethostname(),
-                    "pid": os.getpid(),
-                }, ensure_ascii=False))
-            return
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-                if age > _LOCK_STALE_S:
-                    log.warning("Removing stale notes lock: %s", lock)
-                    lock.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.time() >= deadline:
-                raise TimeoutError(f"Shared notes lock timeout: {lock}")
-            time.sleep(_LOCK_POLL_S)
-
-
-def _release_lock():
-    try:
-        _lock_path().unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("Shared notes lock release error: %s", exc)
-
-
-@contextmanager
-def _locked_data():
-    _acquire_lock()
-    try:
-        raw = read_dict_for_write(_path(), "Megjegyzések")
-        data = {k: v for k, v in raw.items() if isinstance(v, list)}
-        yield data
-        _atomic_write(data)
-        _cache["mtime"] = None  # invalidate read cache after write
-    finally:
-        _release_lock()
+def compact() -> int:
+    return _ledger.compact()
 
 
 def get_all_notes() -> dict:
-    """All notes keyed by AWB. mtime-cached, safe per UI render."""
-    mtime = get_notes_mtime()
-    if _cache["mtime"] == mtime:
-        return _cache["data"]
-    data = _read_unlocked()
-    _cache["mtime"] = mtime
-    _cache["data"] = data
-    return data
+    """All live notes keyed by AWB, oldest first. Cached on the files' signature."""
+    grouped: dict = {}
+    for note_id, rec in _ledger.live().items():
+        awb = str(rec.get("awb") or "")
+        if not awb:
+            continue
+        # "at" has second resolution: order by creation ts, legacy list order.
+        order = (str(rec.get("at") or ""), int(rec.get("seq") or 0), str(rec.get("created_ts") or rec.get("ts") or ""))
+        note = {k: rec.get(k) for k in _NOTE_KEYS}
+        note["id"] = note.get("id") or note_id
+        grouped.setdefault(awb, []).append((order, note))
+    return {awb: [n for _, n in sorted(items, key=lambda item: item[0])]
+            for awb, items in grouped.items()}
 
 
 def get_notes(awb: str) -> list[dict]:
@@ -176,8 +90,9 @@ def add_note(awb: str, text: str) -> dict | None:
         "on": socket.gethostname(),
         "at": datetime.now().isoformat(timespec="seconds"),
     }
-    with _locked_data() as data:
-        data.setdefault(awb, []).append(note)
+    with _ledger.edit() as txn:
+        txn.put(note["id"], {**note, "awb": awb,
+                             "created_ts": datetime.now().isoformat(timespec="microseconds")})
     log.info("Megjegyzés hozzáadva: %s (%s)", awb, note["id"])
     return note
 
@@ -189,16 +104,10 @@ def delete_note(awb: str, note_id: str) -> bool:
     if not awb or not note_id:
         return False
     removed = False
-    with _locked_data() as data:
-        notes = data.get(awb)
-        if isinstance(notes, list):
-            kept = [n for n in notes if n.get("id") != note_id]
-            if len(kept) != len(notes):
-                removed = True
-                if kept:
-                    data[awb] = kept
-                else:
-                    del data[awb]
+    with _ledger.edit() as txn:
+        rec = txn.live.get(note_id)
+        if rec is not None and str(rec.get("awb") or "") == awb:
+            removed = txn.delete(note_id)
     if removed:
         log.info("Megjegyzés törölve: %s (%s)", awb, note_id)
     return removed
@@ -239,12 +148,14 @@ def cleanup_missing(active_awbs: set[str], stored_awbs: set[str]) -> int:
     ]
     if not orphan:
         return 0
-    removed = 0
-    with _locked_data() as data:
-        for awb in orphan:
-            if awb in data:
-                del data[awb]
-                removed += 1
+    orphan_set = set(orphan)
+    removed_awbs = set()
+    with _ledger.edit() as txn:
+        for note_id, rec in list(txn.live.items()):
+            awb = str(rec.get("awb", ""))
+            if awb in orphan_set and txn.delete(note_id):
+                removed_awbs.add(awb)
+    removed = len(removed_awbs)
     if removed:
         log.info("Megjegyzés cleanup: %d lejárt AWB", removed)
     return removed
