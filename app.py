@@ -53,13 +53,14 @@ if getattr(sys, "frozen", False):
 import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
-from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
+from dash import ALL, Input, Output, State, ctx, dcc, html, no_update, set_props
 from flask import request
 
 import activity_log
 import data_cache
 import notes_manager
 import overrides_manager
+from shared_json import SharedStateUnreadableError
 import storage_manager
 import uld_stack_manager
 import oracle_ecomm
@@ -210,6 +211,20 @@ server = app.server
 
 from http_performance import install_http_performance
 install_http_performance(server)
+
+
+@server.before_request
+def _reject_foreign_post():
+    # Any web page open in the user's browser can POST to 127.0.0.1:8501
+    # (text/plain bodies need no CORS preflight, and get_json(force=True)
+    # accepts them). Only the Flow Manager's own pages may change state.
+    if request.method == "POST":
+        import source_open
+        if not source_open.is_local_request(request):
+            from flask import jsonify
+            log.warning("Rejected foreign POST %s (Origin=%s)", request.path, request.headers.get("Origin"))
+            return jsonify(ok=False, error="A kérés csak a helyi Flow Managerből fogadható el."), 403
+    return None
 
 
 @server.before_request
@@ -9529,9 +9544,11 @@ def update_user_activity(ts):
 @app.callback(
     Output("store-action", "data"),
     Input({"type": "store-btn", "index": ALL}, "n_clicks"),
+    State({"type": "store-btn", "index": ALL}, "className"),
+    State({"type": "store-btn", "index": ALL}, "id"),
     prevent_initial_call=True,
 )
-def handle_store_click(n_clicks_list):
+def handle_store_click(n_clicks_list, class_names, button_ids):
     triggered = ctx.triggered_id
     if not triggered or not isinstance(triggered, dict):
         return no_update
@@ -9551,10 +9568,28 @@ def handle_store_click(n_clicks_list):
         rows = df[df["awb"] == awb]
         if not rows.empty:
             row = rows.iloc[0].to_dict()
-    is_now_stored, stored_awbs = storage_manager.toggle_stored(awb, row)
+    # Apply the state the user asked for on the card they saw, not a blind
+    # toggle: a click on a stale card must not undo another user's change.
+    want_stored = _store_button_target_state(awb, class_names, button_ids)
+    if want_stored is None:
+        return no_update
+    changed, stored_awbs = storage_manager.set_stored(awb, row, want_stored)
     data_cache.update_stored_flags(stored_awbs)
-    activity_log.log_event("store_toggle", {"awb": awb, "stored": is_now_stored})
-    return {"awb": awb, "stored": is_now_stored, "ts": time.time()}
+    activity_log.log_event("store_toggle", {"awb": awb, "stored": want_stored, "changed": changed})
+    return {"awb": awb, "stored": want_stored, "ts": time.time()}
+
+
+def _store_button_target_state(awb, class_names, button_ids):
+    """Requested stored state from the clicked button's rendered class."""
+    for button_id, class_name in zip(button_ids or [], class_names or []):
+        if isinstance(button_id, dict) and button_id.get("index") == awb:
+            classes = str(class_name or "").split()
+            if "badge-stored-empty" in classes:
+                return True
+            if "badge-stored-active" in classes:
+                return False
+            return None
+    return None
 
 
 @app.callback(
@@ -9612,6 +9647,20 @@ def handle_truck_store_click(n_clicks_list):
     return {"plate_key": plate_key, "turn_key": turn_key or plate_key, "stored_count": stored_count, "ts": time.time()}
 
 
+def _shared_write_error_text(exc) -> str:
+    if isinstance(exc, TimeoutError):
+        return "A közös mentés foglalt, próbáld újra pár másodperc múlva."
+    if isinstance(exc, SharedStateUnreadableError):
+        return "A közös fájl nem olvasható, a mentés elmaradt. Szólj a fejlesztőnek."
+    return "A közös mentés nem sikerült, próbáld újra."
+
+
+def _report_shared_write_error(exc):
+    """Show a failed shared write in the error area instead of a silent 500."""
+    set_props("error-area", {"children": html.Div(_shared_write_error_text(exc), className="error-toast")})
+    return no_update
+
+
 @app.callback(
     Output("note-action", "data"),
     Input({"type": "note-add", "index": ALL}, "n_clicks"),
@@ -9632,7 +9681,12 @@ def handle_note_action(_adds, _submits, _dels, input_values, input_ids):
 
     if triggered.get("type") == "note-del":
         awb, _, note_id = str(triggered.get("index", "")).partition("|")
-        if not notes_manager.delete_note(awb, note_id):
+        try:
+            deleted = notes_manager.delete_note(awb, note_id)
+        except (TimeoutError, SharedStateUnreadableError, OSError) as exc:
+            log.warning("Note delete failed for %s: %s", awb, exc)
+            return _report_shared_write_error(exc)
+        if not deleted:
             return no_update
         activity_log.log_event("note_delete", {"awb": awb, "note_id": note_id})
         data_cache.bump_data_version()
@@ -9647,7 +9701,11 @@ def handle_note_action(_adds, _submits, _dels, input_values, input_ids):
             break
     if not awb or not text:
         return no_update
-    note = notes_manager.add_note(awb, text)
+    try:
+        note = notes_manager.add_note(awb, text)
+    except (TimeoutError, SharedStateUnreadableError, OSError) as exc:
+        log.warning("Note add failed for %s: %s", awb, exc)
+        return _report_shared_write_error(exc)
     if not note:
         return no_update
     activity_log.log_event("note_add", {"awb": awb, "note_id": note["id"]})
@@ -10009,70 +10067,74 @@ def dev_action(_ops, _dels, ovr_values, ovr_ids, token, version):
         return no_update, "Nincs jogosultság."
     version = (version or 0) + 1
 
-    if triggered.get("type") == "dev-op":
-        name = triggered.get("name", "")
-        if name == "force-refresh":
-            data_cache.mark_refresh_started()
-            data_cache.trigger_refresh()
-            activity_log.log_event("dev_force_refresh")
-            return version, "Újraolvasás elindítva."
-        if name == "clear-cache":
-            removed = _dev_clear_cache()
-            activity_log.log_event("dev_clear_cache", {"removed": removed})
-            return version, f"Cache törölve ({removed} fájl)."
-        if name == "unlock":
-            removed = _dev_unlock()
-            activity_log.log_event("dev_unlock", {"removed": removed})
-            return version, f"Lock fájlok feloldva: {', '.join(removed) if removed else 'nem volt'}."
-        if name == "ovr-save":
-            fields = {}
-            for cid, value in zip(ovr_ids or [], ovr_values or []):
-                if isinstance(cid, dict):
-                    fields[cid.get("name")] = value
-            awb = str(fields.get("awb") or "").strip()
-            field = str(fields.get("field") or "").strip()
-            value = fields.get("value")
-            if not awb or not field:
-                return version, "Hiányzó AWB vagy mező."
-            ok, err = overrides_manager.set_override(awb, field, value)
-            if not ok:
-                return version, err
-            activity_log.log_event("dev_override_set",
-                                   {"awb": awb, "field": field, "value": str(value)})
-            data_cache.update_stored_flags()
-            return version, f"Felülbírálás mentve: {awb}.{field}"
-        return no_update, no_update
+    try:
+        if triggered.get("type") == "dev-op":
+            name = triggered.get("name", "")
+            if name == "force-refresh":
+                data_cache.mark_refresh_started()
+                data_cache.trigger_refresh()
+                activity_log.log_event("dev_force_refresh")
+                return version, "Újraolvasás elindítva."
+            if name == "clear-cache":
+                removed = _dev_clear_cache()
+                activity_log.log_event("dev_clear_cache", {"removed": removed})
+                return version, f"Cache törölve ({removed} fájl)."
+            if name == "unlock":
+                removed = _dev_unlock()
+                activity_log.log_event("dev_unlock", {"removed": removed})
+                return version, f"Lock fájlok feloldva: {', '.join(removed) if removed else 'nem volt'}."
+            if name == "ovr-save":
+                fields = {}
+                for cid, value in zip(ovr_ids or [], ovr_values or []):
+                    if isinstance(cid, dict):
+                        fields[cid.get("name")] = value
+                awb = str(fields.get("awb") or "").strip()
+                field = str(fields.get("field") or "").strip()
+                value = fields.get("value")
+                if not awb or not field:
+                    return version, "Hiányzó AWB vagy mező."
+                ok, err = overrides_manager.set_override(awb, field, value)
+                if not ok:
+                    return version, err
+                activity_log.log_event("dev_override_set",
+                                       {"awb": awb, "field": field, "value": str(value)})
+                data_cache.update_stored_flags()
+                return version, f"Felülbírálás mentve: {awb}.{field}"
+            return no_update, no_update
 
-    # dev-del
-    kind = triggered.get("kind", "")
-    index = str(triggered.get("index", ""))
-    if kind == "stored":
-        storage_manager.mark_unstored(index)
-        data_cache.update_stored_flags()
-        activity_log.log_event("dev_del_stored", {"awb": index})
-        return version, f"Betárolva bejegyzés törölve: {index}"
-    if kind == "note":
-        awb, _, note_id = index.partition("|")
-        notes_manager.delete_note(awb, note_id)
-        data_cache.bump_data_version()
-        activity_log.log_event("dev_del_note", {"awb": awb, "note_id": note_id})
-        return version, f"Megjegyzés törölve: {awb}"
-    if kind == "stack":
-        uld_stack_manager.delete_stack(index)
-        activity_log.log_event("dev_del_stack", {"stack_id": index})
-        return version, "Stack törölve."
-    if kind == "rename":
-        uld_stack_manager.delete_rename(index)
-        data_cache.bump_data_version()
-        activity_log.log_event("dev_del_rename", {"old": index})
-        return version, f"Átnevezés törölve: {index}"
-    if kind == "override":
-        awb, _, field = index.partition("|")
-        overrides_manager.clear_override(awb, field or None)
-        data_cache.update_stored_flags()
-        activity_log.log_event("dev_del_override", {"awb": awb, "field": field})
-        return version, f"Felülbírálás törölve: {awb}.{field}"
-    return no_update, no_update
+        # dev-del
+        kind = triggered.get("kind", "")
+        index = str(triggered.get("index", ""))
+        if kind == "stored":
+            storage_manager.mark_unstored(index)
+            data_cache.update_stored_flags()
+            activity_log.log_event("dev_del_stored", {"awb": index})
+            return version, f"Betárolva bejegyzés törölve: {index}"
+        if kind == "note":
+            awb, _, note_id = index.partition("|")
+            notes_manager.delete_note(awb, note_id)
+            data_cache.bump_data_version()
+            activity_log.log_event("dev_del_note", {"awb": awb, "note_id": note_id})
+            return version, f"Megjegyzés törölve: {awb}"
+        if kind == "stack":
+            uld_stack_manager.delete_stack(index)
+            activity_log.log_event("dev_del_stack", {"stack_id": index})
+            return version, "Stack törölve."
+        if kind == "rename":
+            uld_stack_manager.delete_rename(index)
+            data_cache.bump_data_version()
+            activity_log.log_event("dev_del_rename", {"old": index})
+            return version, f"Átnevezés törölve: {index}"
+        if kind == "override":
+            awb, _, field = index.partition("|")
+            overrides_manager.clear_override(awb, field or None)
+            data_cache.update_stored_flags()
+            activity_log.log_event("dev_del_override", {"awb": awb, "field": field})
+            return version, f"Felülbírálás törölve: {awb}.{field}"
+        return no_update, no_update
+    except (TimeoutError, SharedStateUnreadableError, OSError) as exc:
+        log.warning("Developer action failed: %s", exc)
+        return version, _shared_write_error_text(exc)
 
 
 # ---------------------------------------------------------------------------

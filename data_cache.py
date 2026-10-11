@@ -554,47 +554,51 @@ def _file_watcher():
     pending_stacks_since = 0.0
     while True:
         time.sleep(_WATCH_INTERVAL_S)
-        current = _get_mtime(stored_path)
-        if current != last_stored_mtime and _shared_json_is_complete(stored_path):
-            last_stored_mtime = current
-            log.info("Shared stored state changed: %s — syncing flags", os.path.basename(stored_path))
-            update_stored_flags()
+        try:
+            current = _get_mtime(stored_path)
+            if current != last_stored_mtime and _shared_json_is_complete(stored_path):
+                last_stored_mtime = current
+                log.info("Shared stored state changed: %s — syncing flags", os.path.basename(stored_path))
+                update_stored_flags()
 
-        current_notes = _get_mtime(notes_path)
-        if current_notes != last_notes_mtime and _shared_json_is_complete(notes_path):
-            last_notes_mtime = current_notes
-            log.info("Shared notes changed — bumping data_version")
-            bump_data_version()
+            current_notes = _get_mtime(notes_path)
+            if current_notes != last_notes_mtime and _shared_json_is_complete(notes_path):
+                last_notes_mtime = current_notes
+                log.info("Shared notes changed — bumping data_version")
+                bump_data_version()
 
-        current_overrides = _get_mtime(overrides_path)
-        if current_overrides != last_overrides_mtime and _shared_json_is_complete(overrides_path):
-            last_overrides_mtime = current_overrides
-            log.info("Shared overrides changed — reapplying")
-            update_stored_flags()
+            current_overrides = _get_mtime(overrides_path)
+            if current_overrides != last_overrides_mtime and _shared_json_is_complete(overrides_path):
+                last_overrides_mtime = current_overrides
+                log.info("Shared overrides changed — reapplying")
+                update_stored_flags()
 
-        now = time.monotonic()
-        current_stacks_mtime = _uld_state_signature()
-        if current_stacks_mtime != last_stacks_mtime:
-            if current_stacks_mtime != pending_stacks_mtime:
-                pending_stacks_mtime = current_stacks_mtime
-                pending_stacks_since = now
-            elif (now - pending_stacks_since >= _STACK_STABLE_SECONDS
-                  and all(_shared_json_is_complete(str(path)) for path in (
-                      uld_stack_manager.get_stacks_path(), uld_stack_manager.get_renames_path(),
-                      uld_stack_manager.get_overrides_path()))):
-                last_stacks_mtime = current_stacks_mtime
+            now = time.monotonic()
+            current_stacks_mtime = _uld_state_signature()
+            if current_stacks_mtime != last_stacks_mtime:
+                if current_stacks_mtime != pending_stacks_mtime:
+                    pending_stacks_mtime = current_stacks_mtime
+                    pending_stacks_since = now
+                elif (now - pending_stacks_since >= _STACK_STABLE_SECONDS
+                      and all(_shared_json_is_complete(str(path)) for path in (
+                          uld_stack_manager.get_stacks_path(), uld_stack_manager.get_renames_path(),
+                          uld_stack_manager.get_overrides_path()))):
+                    last_stacks_mtime = current_stacks_mtime
+                    pending_stacks_mtime = None
+                    pending_stacks_since = 0.0
+                    log.info("ULD stacks stable - bumping data_version")
+                    with _lock:
+                        _state["data_version"] += 1
+            else:
                 pending_stacks_mtime = None
                 pending_stacks_since = 0.0
-                log.info("ULD stacks stable - bumping data_version")
-                with _lock:
-                    _state["data_version"] += 1
-        else:
-            pending_stacks_mtime = None
-            pending_stacks_since = 0.0
 
-        # Do not watch Excel source files here. OneDrive/Excel can touch metadata
-        # repeatedly and would start refreshes before the configured interval.
-        # Full source reads are intentionally limited to scheduled/manual refreshes.
+            # Do not watch Excel source files here. OneDrive/Excel can touch metadata
+            # repeatedly and would start refreshes before the configured interval.
+            # Full source reads are intentionally limited to scheduled/manual refreshes.
+        except Exception as exc:
+            # A dead watcher silently stops every shared-state sync; keep it alive.
+            log.error("File watcher iteration failed: %s", exc, exc_info=True)
 
 
 def _set_load_progress(percent: int, stage: str, detail: str = "") -> None:
@@ -760,11 +764,16 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
             # The full read is also a valid fallback ULD snapshot.
             _state["uld_initial_load_complete"] = True
     # Auto-remove stored entries that BUD-Pallets already shows as issued.
+    # One locked write for the whole batch; a busy/unreadable shared file must
+    # not abort publishing the fresh read (next refresh retries the cleanup).
     if issued_awbs:
-        stored_now = storage_manager.get_stored_awbs()
-        for awb in stored_now & issued_awbs:
-            storage_manager.mark_unstored(awb)
-            log.info("Auto-unstored: %s (Kiadva in BUD-Pallets)", awb)
+        try:
+            stale = storage_manager.get_stored_awbs() & set(issued_awbs)
+            if stale:
+                removed = storage_manager.mark_many_unstored(stale)
+                log.info("Auto-unstored %d AWB (Kiadva in BUD-Pallets)", removed)
+        except Exception as exc:
+            log.warning("Auto-unstore skipped, retried on next refresh: %s", exc)
     if not df.empty:
         stored = storage_manager.get_stored_awbs()
         df = overrides_manager.apply_overrides_to_df(df)
@@ -877,11 +886,18 @@ def _worker():
             )
             wait_s = _STALE_RETRY_S
         elif status == "ok":
-            if isinstance(payload, dict) and "result" in payload:
-                updated = _apply_read_result(payload["result"], first, payload.get("started_at"),
-                                             payload.get("source_signature"))
-            else:  # backward-compatible with an already queued pre-upgrade result
-                updated = _apply_read_result(payload, first)
+            try:
+                if isinstance(payload, dict) and "result" in payload:
+                    updated = _apply_read_result(payload["result"], first, payload.get("started_at"),
+                                                 payload.get("source_signature"))
+                else:  # backward-compatible with an already queued pre-upgrade result
+                    updated = _apply_read_result(payload, first)
+            except Exception as exc:
+                # Never let a publish error kill the worker: the dashboard would
+                # freeze on old data with no further refresh attempts.
+                log.error("Cache: applying read result failed: %s", exc, exc_info=True)
+                _mark_read_stalled(f"feldolgozási hiba: {exc}", first)
+                updated = False
             if first:
                 with _lock:
                     err = (_state.get("errors") or {}).get("error")
