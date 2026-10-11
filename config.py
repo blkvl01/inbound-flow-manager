@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -197,6 +198,10 @@ def _is_legacy_shared_state_path(path: str) -> bool:
     )
 
 
+# Per-machine shared ledgers (shared_ledger.py): <name>.<HOST>.json
+_LEDGER_FILE_RE = re.compile(r"^(stored_awbs|item_notes|item_overrides)\.[A-Za-z0-9_-]+\.json$")
+
+
 def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
     """Copy durable shared records into the existing new workspace once.
 
@@ -208,7 +213,7 @@ def _migrate_legacy_shared_state(source: Path, target: Path) -> None:
     for item in source.iterdir():
         if not item.is_file():
             continue
-        if not item.name.endswith(".shared.json"):
+        if not (item.name.endswith(".shared.json") or _LEDGER_FILE_RE.match(item.name)):
             continue
         destination = target / item.name
         if destination.exists():

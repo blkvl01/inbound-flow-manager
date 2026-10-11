@@ -536,12 +536,11 @@ def _file_watcher():
     """Watches shared stored-state and ULD state JSON files; syncs on change.
     Excel source files are NOT watched here — refreshes only on timer or manual trigger.
     """
-    stored_path = str(storage_manager.get_storage_path())
-    last_stored_mtime = _get_mtime(stored_path)
-    notes_path = str(notes_manager.get_notes_path())
-    last_notes_mtime = _get_mtime(notes_path)
-    overrides_path = str(overrides_manager.get_overrides_path())
-    last_overrides_mtime = _get_mtime(overrides_path)
+    # Per-machine ledgers: the signature covers every machine's file. A
+    # half-synced file is tolerated by the ledger (last good parse is kept).
+    last_stored_sig = storage_manager.state_signature()
+    last_notes_sig = notes_manager.state_signature()
+    last_overrides_sig = overrides_manager.state_signature()
     def _uld_state_signature():
         return (
             uld_stack_manager.get_stacks_mtime(),
@@ -555,21 +554,21 @@ def _file_watcher():
     while True:
         time.sleep(_WATCH_INTERVAL_S)
         try:
-            current = _get_mtime(stored_path)
-            if current != last_stored_mtime and _shared_json_is_complete(stored_path):
-                last_stored_mtime = current
-                log.info("Shared stored state changed: %s — syncing flags", os.path.basename(stored_path))
+            current = storage_manager.state_signature()
+            if current != last_stored_sig:
+                last_stored_sig = current
+                log.info("Shared stored state changed — syncing flags")
                 update_stored_flags()
 
-            current_notes = _get_mtime(notes_path)
-            if current_notes != last_notes_mtime and _shared_json_is_complete(notes_path):
-                last_notes_mtime = current_notes
+            current_notes = notes_manager.state_signature()
+            if current_notes != last_notes_sig:
+                last_notes_sig = current_notes
                 log.info("Shared notes changed — bumping data_version")
                 bump_data_version()
 
-            current_overrides = _get_mtime(overrides_path)
-            if current_overrides != last_overrides_mtime and _shared_json_is_complete(overrides_path):
-                last_overrides_mtime = current_overrides
+            current_overrides = overrides_manager.state_signature()
+            if current_overrides != last_overrides_sig:
+                last_overrides_sig = current_overrides
                 log.info("Shared overrides changed — reapplying")
                 update_stored_flags()
 
@@ -788,6 +787,7 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
             )
         except Exception as exc:
             log.debug("Notes cleanup skipped: %s", exc)
+    _maybe_compact_ledgers()
     with _lock:
         # A full Excel read is much slower than the ULD-only reader.  If the fast
         # reader completed after this full read started, its snapshot is newer and
@@ -848,6 +848,23 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         log.info("Source changed during read; captured version kept, scheduling fresh snapshot")
         trigger_refresh()
     return True
+
+
+_COMPACT_INTERVAL_S = 3600.0
+_last_compact = [0.0]
+
+
+def _maybe_compact_ledgers():
+    """Shrink this machine's shared ledger files at most once an hour."""
+    now = time.monotonic()
+    if _last_compact[0] and now - _last_compact[0] < _COMPACT_INTERVAL_S:
+        return
+    _last_compact[0] = now
+    for manager in (storage_manager, notes_manager, overrides_manager):
+        try:
+            manager.compact()
+        except Exception as exc:
+            log.warning("Ledger compaction skipped (%s): %s", manager.__name__, exc)
 
 
 def _worker():

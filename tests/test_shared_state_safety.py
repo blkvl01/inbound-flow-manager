@@ -20,8 +20,6 @@ class SharedStateDirMixin:
         self._old_shared = os.environ.get("FLOW_SHARED_STATE_DIR")
         self.tmp = Path(tempfile.mkdtemp(prefix="flow_safety_"))
         os.environ["FLOW_SHARED_STATE_DIR"] = str(self.tmp)
-        notes_manager._cache["mtime"] = None
-        overrides_manager._cache["mtime"] = None
 
     def tearDown(self):
         if self._old_shared is None:
@@ -62,33 +60,39 @@ class ReadForWriteTests(SharedStateDirMixin, unittest.TestCase):
         self.assertIs(shared_json.time.sleep, real_sleep)
 
 
+def _own(name):
+    from shared_ledger import _host
+    return f"{name}.{_host()}.json"
+
+
 class CorruptSharedFileNeverWipedTests(SharedStateDirMixin, unittest.TestCase):
-    CORRUPT = '{"111": {"stored_at": "2026'
+    CORRUPT = '{"records": {"111": {"stored_at": "2026'
 
     def _assert_untouched(self, name):
         self.assertEqual((self.tmp / name).read_text(encoding="utf-8"), self.CORRUPT)
-        self.assertFalse((self.tmp / name.replace(".json", ".lock")).exists(), "lock must be released")
+        self.assertFalse(list(self.tmp.glob("*.lock")), "lock must be released")
 
-    def test_store_write_does_not_replace_unreadable_file(self):
+    def _refused(self, name, write):
+        (self.tmp / name).write_text(self.CORRUPT, encoding="utf-8")
+        with mock.patch.object(shared_json, "_READ_RETRY_DELAY_S", 0), \
+                self.assertRaises(shared_json.SharedStateUnreadableError):
+            write()
+        self._assert_untouched(name)
+
+    def test_store_write_does_not_replace_unreadable_own_file(self):
+        self._refused(_own("stored_awbs"), lambda: storage_manager.set_stored("222", {"awb": "222"}, True))
+
+    def test_note_write_does_not_replace_unreadable_own_file(self):
+        self._refused(_own("item_notes"), lambda: notes_manager.add_note("222", "x"))
+
+    def test_override_write_does_not_replace_unreadable_own_file(self):
+        self._refused(_own("item_overrides"), lambda: overrides_manager.set_override("222", "lmp", "TEMU"))
+
+    def test_corrupt_legacy_file_is_never_written(self):
         (self.tmp / "stored_awbs.shared.json").write_text(self.CORRUPT, encoding="utf-8")
-        with mock.patch.object(shared_json, "_READ_RETRY_DELAY_S", 0), \
-                self.assertRaises(shared_json.SharedStateUnreadableError):
-            storage_manager.set_stored("222", {"awb": "222"}, True)
-        self._assert_untouched("stored_awbs.shared.json")
-
-    def test_note_write_does_not_replace_unreadable_file(self):
-        (self.tmp / "item_notes.shared.json").write_text(self.CORRUPT, encoding="utf-8")
-        with mock.patch.object(shared_json, "_READ_RETRY_DELAY_S", 0), \
-                self.assertRaises(shared_json.SharedStateUnreadableError):
-            notes_manager.add_note("222", "x")
-        self._assert_untouched("item_notes.shared.json")
-
-    def test_override_write_does_not_replace_unreadable_file(self):
-        (self.tmp / "item_overrides.shared.json").write_text(self.CORRUPT, encoding="utf-8")
-        with mock.patch.object(shared_json, "_READ_RETRY_DELAY_S", 0), \
-                self.assertRaises(shared_json.SharedStateUnreadableError):
-            overrides_manager.set_override("222", "lmp", "TEMU")
-        self._assert_untouched("item_overrides.shared.json")
+        storage_manager.set_stored("222", {"awb": "222"}, True)
+        self.assertEqual((self.tmp / "stored_awbs.shared.json").read_text(encoding="utf-8"), self.CORRUPT)
+        self.assertEqual(storage_manager.get_stored_awbs(), {"222"})
 
 
 class IdempotentStoreTests(SharedStateDirMixin, unittest.TestCase):
@@ -109,10 +113,123 @@ class IdempotentStoreTests(SharedStateDirMixin, unittest.TestCase):
 
     def test_mark_many_unstored_removes_batch_in_one_write(self):
         storage_manager.mark_many_stored({"1": {}, "2": {}, "3": {}})
-        with mock.patch.object(storage_manager, "_acquire_lock", wraps=storage_manager._acquire_lock) as lock:
+        ledger = storage_manager._ledger
+        with mock.patch.object(ledger, "_acquire_lock", wraps=ledger._acquire_lock) as lock:
             self.assertEqual(storage_manager.mark_many_unstored({"1", "2", "missing", ""}), 2)
         self.assertEqual(lock.call_count, 1)
         self.assertEqual(storage_manager.get_stored_awbs(), {"3"})
+
+
+class PerMachineLedgerTests(SharedStateDirMixin, unittest.TestCase):
+    def as_host(self, name):
+        return mock.patch("shared_ledger._host", return_value=name)
+
+    def test_two_machines_never_lose_each_others_writes(self):
+        with self.as_host("PC_A"):
+            storage_manager.set_stored("A1", {"awb": "A1"}, True)
+        with self.as_host("PC_B"):
+            # B writes without having seen A's file content in its own file.
+            storage_manager.set_stored("B1", {"awb": "B1"}, True)
+        self.assertTrue((self.tmp / "stored_awbs.PC_A.json").exists())
+        self.assertTrue((self.tmp / "stored_awbs.PC_B.json").exists())
+        self.assertEqual(storage_manager.get_stored_awbs(), {"A1", "B1"})
+
+    def test_other_machine_can_unstore_and_latest_wins(self):
+        with self.as_host("PC_A"):
+            storage_manager.set_stored("X", {"awb": "X"}, True)
+        with self.as_host("PC_B"):
+            storage_manager.set_stored("X", {}, False)
+        self.assertEqual(storage_manager.get_stored_awbs(), set())
+        with self.as_host("PC_A"):
+            storage_manager.set_stored("X", {"awb": "X"}, True)
+        self.assertEqual(storage_manager.get_stored_awbs(), {"X"})
+
+    def test_sequential_action_wins_even_if_other_clock_runs_ahead(self):
+        future = "2099-01-01T00:00:00.000000"
+        (self.tmp / "stored_awbs.PC_FAST.json").write_text(json.dumps({"version": 1, "records": {
+            "X": {"stored_at": future, "stored_by": "u", "stored_on": "PC_FAST",
+                  "snapshot": {}, "ts": future, "deleted": False}}}), encoding="utf-8")
+        with self.as_host("PC_A"):
+            self.assertTrue(storage_manager.set_stored("X", {}, False)[0])
+        self.assertEqual(storage_manager.get_stored_awbs(), set())
+
+    def test_legacy_file_is_merged_and_can_be_overridden(self):
+        legacy = {"OLD": {"stored_at": "2026-01-01T08:00:00", "stored_by": "u", "stored_on": "pc",
+                          "snapshot": {"awb": "OLD"}}}
+        (self.tmp / "stored_awbs.shared.json").write_text(json.dumps(legacy), encoding="utf-8")
+        self.assertEqual(storage_manager.get_stored_awbs(), {"OLD"})
+        self.assertEqual(storage_manager.load_stored()["OLD"]["snapshot"], {"awb": "OLD"})
+        storage_manager.set_stored("OLD", {}, False)
+        self.assertEqual(storage_manager.get_stored_awbs(), set())
+        self.assertEqual(json.loads((self.tmp / "stored_awbs.shared.json").read_text()), legacy)
+
+    def test_half_synced_other_machine_file_keeps_last_good_view(self):
+        with self.as_host("PC_B"):
+            storage_manager.set_stored("B1", {"awb": "B1"}, True)
+        self.assertEqual(storage_manager.get_stored_awbs(), {"B1"})
+        (self.tmp / "stored_awbs.PC_B.json").write_text('{"records": {"B1"', encoding="utf-8")
+        self.assertEqual(storage_manager.get_stored_awbs(), {"B1"})
+
+    def test_notes_from_two_machines_and_cross_machine_delete(self):
+        with self.as_host("PC_A"):
+            a = notes_manager.add_note("AWB", "A irta")
+        with self.as_host("PC_B"):
+            notes_manager.add_note("AWB", "B irta")
+            self.assertTrue(notes_manager.delete_note("AWB", a["id"]))
+        self.assertEqual([n["text"] for n in notes_manager.get_notes("AWB")], ["B irta"])
+
+    def test_legacy_notes_and_overrides_are_visible(self):
+        (self.tmp / "item_notes.shared.json").write_text(json.dumps({"AWB": [
+            {"id": "n1", "text": "elso", "at": "2026-01-01T08:00:00"},
+            {"id": "n2", "text": "masodik", "at": "2026-01-01T08:00:00"}]}), encoding="utf-8")
+        (self.tmp / "item_overrides.shared.json").write_text(json.dumps({"AWB": {
+            "fields": {"lmp": "TEMU"}, "set_by": "u", "set_at": "2026-01-01T08:00:00"}}), encoding="utf-8")
+        self.assertEqual([n["text"] for n in notes_manager.get_notes("AWB")], ["elso", "masodik"])
+        self.assertEqual(overrides_manager.get_all_overrides()["AWB"]["fields"], {"lmp": "TEMU"})
+        overrides_manager.clear_override("AWB")
+        self.assertEqual(overrides_manager.get_all_overrides(), {})
+
+    def test_compaction_drops_superseded_and_old_tombstones_only(self):
+        from datetime import datetime, timedelta
+        with self.as_host("PC_A"):
+            storage_manager.set_stored("S", {"awb": "S"}, True)    # superseded by B below
+            storage_manager.set_stored("T", {"awb": "T"}, True)
+            storage_manager.set_stored("T", {}, False)             # own tombstone, nobody else
+            storage_manager.set_stored("K", {"awb": "K"}, True)    # live, kept
+        with self.as_host("PC_B"):
+            storage_manager.set_stored("S", {}, False)
+        before = storage_manager.get_stored_awbs()
+        with self.as_host("PC_A"):
+            removed = storage_manager._ledger.compact(now=datetime.now() + timedelta(days=30))
+        own = json.loads((self.tmp / "stored_awbs.PC_A.json").read_text())["records"]
+        self.assertEqual(removed, 2)
+        self.assertEqual(set(own), {"K"})
+        self.assertEqual(storage_manager.get_stored_awbs(), before)
+
+    def test_compaction_keeps_tombstone_hiding_another_source(self):
+        from datetime import datetime, timedelta
+        (self.tmp / "stored_awbs.shared.json").write_text(json.dumps({"OLD": {
+            "stored_at": "2026-01-01T08:00:00", "snapshot": {}}}), encoding="utf-8")
+        with self.as_host("PC_A"):
+            storage_manager.set_stored("OLD", {}, False)
+            storage_manager._ledger.compact(now=datetime.now() + timedelta(days=60))
+        self.assertEqual(storage_manager.get_stored_awbs(), set())
+
+
+class LedgerMigrationTests(unittest.TestCase):
+    def test_legacy_location_migration_copies_per_machine_ledgers(self):
+        import config
+        src, dst = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+        try:
+            for name in ("stored_awbs.PC_A.json", "item_notes.PC_B.json", "stored_awbs.shared.json",
+                         "stored_awbs.PC_A.lock", "stored_awbs.shared.corrupt.20260101-000000.json"):
+                (src / name).write_text("{}", encoding="utf-8")
+            config._migrate_legacy_shared_state(src, dst)
+            self.assertEqual(sorted(p.name for p in dst.iterdir()),
+                             ["item_notes.PC_B.json", "stored_awbs.PC_A.json", "stored_awbs.shared.json"])
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+            shutil.rmtree(dst, ignore_errors=True)
 
 
 class StoreButtonTargetTests(unittest.TestCase):

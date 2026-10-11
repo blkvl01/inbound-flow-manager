@@ -10035,8 +10035,11 @@ def _dev_clear_cache() -> int:
 
 def _dev_unlock() -> list[str]:
     removed = []
-    shared_dir = storage_manager.get_storage_path().parent
-    for pattern in ("*.lock", "activity_logs/*.lock"):
+    shared_dir = storage_manager.get_storage_dir()
+    # Only this machine's ledger locks (+ legacy single-file locks): another
+    # machine's lock file is its own local mutex, synced here by OneDrive.
+    from shared_ledger import _host
+    for pattern in (f"*.{_host()}.lock", "*.shared.lock", "activity_logs/*.lock"):
         for lock in shared_dir.glob(pattern):
             try:
                 lock.unlink()

@@ -1,15 +1,15 @@
 """
 Per-AWB display overrides for the developer menu.
 
-item_overrides.shared.json format:
-  {
-    "<awb>": {
-      "fields": {"lmp": "TEMU", "weight": 123.0, ...},
-      "set_by": "<username>",
-      "set_on": "<computer>",
-      "set_at": "<ISO datetime>"
-    }
-  }
+Stored as a per-machine ledger (see shared_ledger.py), one record per
+(AWB, field):
+
+  item_overrides.<HOST>.json  records: {"[\"<awb>\", \"<field>\"]": {
+      "awb": "...", "field": "...", "value": ..., "set_by": "<user>",
+      "set_on": "<computer>", "set_at": "<ISO>", "ts": "...", "deleted": false}}
+
+The frozen legacy ``item_overrides.shared.json`` ({awb: {"fields": {...}}}) is
+merged in.  get_all_overrides() keeps the old {awb: {"fields": {...}, ...}} shape.
 
 The overrides change only what the dashboard shows: they are applied to the
 in-memory DataFrame AFTER the Excel read and BEFORE the priority engine, so
@@ -19,20 +19,13 @@ import json
 import logging
 import os
 import socket
-import tempfile
-import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from shared_json import read_dict_for_write
+from shared_ledger import Ledger
 from storage_manager import _shared_base_dir
 
 log = logging.getLogger(__name__)
-
-_LOCK_TIMEOUT_S = 15.0
-_LOCK_POLL_S = 0.20
-_LOCK_STALE_S = 120.0
 
 # field -> coercion callable; only these may be overridden
 def _to_bool(v) -> bool:
@@ -50,123 +43,59 @@ OVERRIDABLE_FIELDS: dict = {
     "is_shippable": _to_bool,
 }
 
-_cache: dict = {"mtime": None, "data": {}}
 
 
-def _path() -> Path:
-    return _shared_base_dir() / "item_overrides.shared.json"
+def _key(awb: str, field: str) -> str:
+    return json.dumps([awb, field], ensure_ascii=False)
 
 
-def _lock_path() -> Path:
-    return _shared_base_dir() / "item_overrides.shared.lock"
+def _legacy_records(data: dict) -> dict:
+    records = {}
+    for awb, entry in data.items():
+        fields = entry.get("fields") if isinstance(entry, dict) else None
+        if not isinstance(fields, dict):
+            continue
+        for field, value in fields.items():
+            records[_key(str(awb), str(field))] = {
+                "awb": str(awb), "field": str(field), "value": value,
+                "set_by": entry.get("set_by"), "set_on": entry.get("set_on"),
+                "set_at": entry.get("set_at"), "deleted": False, "ts": entry.get("set_at", ""),
+            }
+    return records
+
+
+_ledger = Ledger("item_overrides", lambda: _shared_base_dir(), _legacy_records)
 
 
 def get_overrides_path() -> Path:
-    return _path()
+    """This machine's ledger file."""
+    return _ledger.own_path()
+
+
+def state_signature() -> tuple:
+    return _ledger.signature()
 
 
 def get_overrides_mtime() -> float:
-    try:
-        return _path().stat().st_mtime
-    except OSError:
-        return 0.0
+    return max((entry[1] for entry in state_signature()[1:]), default=0) / 1e9
 
 
-def _read_unlocked() -> dict:
-    p = _path()
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return {k: v for k, v in data.items() if isinstance(v, dict)}
-            log.warning("item_overrides shared file is not a dict, ignoring: %s", p)
-        except Exception as exc:
-            log.error("item_overrides shared read error: %s", exc)
-    return {}
-
-
-def _atomic_write(data: dict):
-    target = _path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=target.stem + ".", suffix=".tmp", dir=str(target.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-        try:
-            os.replace(tmp_name, target)
-        except OSError:
-            with open(target, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                f.flush()
-    finally:
-        try:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
-        except OSError:
-            pass
-
-
-def _acquire_lock(timeout_s: float = _LOCK_TIMEOUT_S):
-    lock = _lock_path()
-    deadline = time.time() + timeout_s
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "created_at": datetime.now().isoformat(),
-                    "user": os.environ.get("USERNAME", "unknown"),
-                    "host": socket.gethostname(),
-                    "pid": os.getpid(),
-                }, ensure_ascii=False))
-            return
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-                if age > _LOCK_STALE_S:
-                    log.warning("Removing stale overrides lock: %s", lock)
-                    lock.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.time() >= deadline:
-                raise TimeoutError(f"Shared overrides lock timeout: {lock}")
-            time.sleep(_LOCK_POLL_S)
-
-
-def _release_lock():
-    try:
-        _lock_path().unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("Shared overrides lock release error: %s", exc)
-
-
-@contextmanager
-def _locked_data():
-    _acquire_lock()
-    try:
-        raw = read_dict_for_write(_path(), "Felülbírálások")
-        data = {k: v for k, v in raw.items() if isinstance(v, dict)}
-        yield data
-        _atomic_write(data)
-        _cache["mtime"] = None
-    finally:
-        _release_lock()
+def compact() -> int:
+    return _ledger.compact()
 
 
 def get_all_overrides() -> dict:
-    """All overrides keyed by AWB. mtime-cached."""
-    mtime = get_overrides_mtime()
-    if _cache["mtime"] == mtime:
-        return _cache["data"]
-    data = _read_unlocked()
-    _cache["mtime"] = mtime
-    _cache["data"] = data
-    return data
+    """All overrides keyed by AWB: {awb: {"fields": {...}, "set_by", "set_on", "set_at"}}."""
+    grouped: dict = {}
+    for rec in _ledger.live().values():
+        awb, field = str(rec.get("awb") or ""), str(rec.get("field") or "")
+        if not awb or not field:
+            continue
+        entry = grouped.setdefault(awb, {"fields": {}})
+        entry["fields"][field] = rec.get("value")
+        if str(rec.get("set_at") or "") >= str(entry.get("set_at") or ""):
+            entry.update(set_by=rec.get("set_by"), set_on=rec.get("set_on"), set_at=rec.get("set_at"))
+    return grouped
 
 
 def set_override(awb: str, field: str, value) -> tuple[bool, str]:
@@ -187,36 +116,29 @@ def set_override(awb: str, field: str, value) -> tuple[bool, str]:
         coerced = coerce(raw)
     except (TypeError, ValueError):
         return False, f"Érvénytelen érték a(z) {field} mezőhöz: {value!r}"
-    with _locked_data() as data:
-        entry = data.setdefault(awb, {"fields": {}})
-        entry.setdefault("fields", {})[field] = coerced
-        entry["set_by"] = os.environ.get("USERNAME", "unknown")
-        entry["set_on"] = socket.gethostname()
-        entry["set_at"] = datetime.now().isoformat(timespec="seconds")
+    with _ledger.edit() as txn:
+        txn.put(_key(awb, field), {
+            "awb": awb, "field": field, "value": coerced,
+            "set_by": os.environ.get("USERNAME", "unknown"),
+            "set_on": socket.gethostname(),
+            "set_at": datetime.now().isoformat(timespec="seconds"),
+        })
     log.info("Felülbírálás: %s.%s = %r", awb, field, coerced)
     return True, ""
 
 
 def clear_override(awb: str, field: str | None = None) -> bool:
-    """Remove one field override, or the whole AWB entry when field is None."""
+    """Remove one field override, or every field of the AWB when field is None."""
     awb = str(awb or "").strip()
     if not awb:
         return False
     removed = False
-    with _locked_data() as data:
-        entry = data.get(awb)
-        if not isinstance(entry, dict):
-            return False
-        if field is None:
-            del data[awb]
-            removed = True
-        else:
-            fields = entry.get("fields", {})
-            if field in fields:
-                del fields[field]
-                removed = True
-            if not fields:
-                del data[awb]
+    with _ledger.edit() as txn:
+        for key, rec in list(txn.live.items()):
+            if str(rec.get("awb") or "") != awb:
+                continue
+            if field is None or str(rec.get("field") or "") == field:
+                removed = txn.delete(key) or removed
     if removed:
         log.info("Felülbírálás törölve: %s.%s", awb, field or "*")
     return removed

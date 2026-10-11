@@ -1,38 +1,27 @@
 """
 Shared "Betarolva" state for multi-user use.
 
-stored_awbs.shared.json format:
-  {
-    "<awb>": {
-      "stored_at": "<ISO datetime>",
-      "stored_by": "<DOMAIN\\user or username>",
-      "stored_on": "<computer>",
-      "snapshot": { ...row dict... }
-    }
-  }
+Stored as a per-machine ledger (see shared_ledger.py): every machine writes
+only ``stored_awbs.<HOST>.json``; readers merge all machines plus the frozen
+legacy ``stored_awbs.shared.json``.  Record per AWB:
 
-The file is stored in a shared writable folder. The frozen one-file release
-automatically uses the discovered OneDrive workspace; a launcher may override
-this with FLOW_SHARED_STATE_DIR.
+  {"stored_at": "<ISO>", "stored_by": "<user>", "stored_on": "<computer>",
+   "snapshot": {...row dict...}, "ts": "<ISO>", "deleted": false}
+
+The folder is the discovered OneDrive workspace; a launcher may override it
+with FLOW_SHARED_STATE_DIR.
 """
 import json
 import logging
 import os
 import socket
 import sys
-import tempfile
-import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from shared_json import read_dict_for_write
+from shared_ledger import Ledger
 
 log = logging.getLogger(__name__)
-
-_LOCK_TIMEOUT_S = 15.0
-_LOCK_POLL_S = 0.20
-_LOCK_STALE_S = 120.0
 
 
 def _shared_base_dir() -> Path:
@@ -74,121 +63,50 @@ def _shared_base_dir() -> Path:
     return base
 
 
-def _path() -> Path:
-    return _shared_base_dir() / "stored_awbs.shared.json"
+def _legacy_records(data: dict) -> dict:
+    return {
+        str(awb): {**entry, "deleted": False, "ts": entry.get("stored_at", "")}
+        for awb, entry in data.items() if isinstance(entry, dict)
+    }
 
 
-def _lock_path() -> Path:
-    return _shared_base_dir() / "stored_awbs.shared.lock"
+_ledger = Ledger("stored_awbs", lambda: _shared_base_dir(), _legacy_records)
+
+_ENTRY_KEYS = ("stored_at", "stored_by", "stored_on", "snapshot")
 
 
 def get_storage_path() -> Path:
-    return _path()
+    """This machine's ledger file (its parent is the shared folder)."""
+    return _ledger.own_path()
+
+
+def get_storage_dir() -> Path:
+    return _shared_base_dir()
+
+
+def state_signature() -> tuple:
+    return _ledger.signature()
 
 
 def get_storage_mtime() -> float:
-    try:
-        return _path().stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _read_unlocked() -> dict:
-    p = _path()
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-            log.warning("stored_awbs shared file is not a dict, ignoring: %s", p)
-        except Exception as exc:
-            log.error("stored_awbs shared read error: %s", exc)
-    return {}
+    return max((entry[1] for entry in state_signature()[1:]), default=0) / 1e9
 
 
 def load_stored() -> dict:
-    return _read_unlocked()
+    return {awb: {k: rec.get(k) for k in _ENTRY_KEYS} for awb, rec in _ledger.live().items()}
 
 
-def _atomic_write(data: dict):
-    target = _path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=target.stem + ".",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-        try:
-            os.replace(tmp_name, target)
-        except OSError:
-            with open(target, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                f.flush()
-    finally:
-        try:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
-        except OSError:
-            pass
+def compact() -> int:
+    return _ledger.compact()
 
 
-def _acquire_lock(timeout_s: float = _LOCK_TIMEOUT_S):
-    lock = _lock_path()
-    deadline = time.time() + timeout_s
-
-    while True:
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "created_at": datetime.now().isoformat(),
-                            "user": os.environ.get("USERNAME", "unknown"),
-                            "host": socket.gethostname(),
-                            "pid": os.getpid(),
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-            return
-        except FileExistsError:
-            try:
-                age = time.time() - lock.stat().st_mtime
-                if age > _LOCK_STALE_S:
-                    log.warning("Removing stale shared lock: %s", lock)
-                    lock.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
-                continue
-
-            if time.time() >= deadline:
-                raise TimeoutError(f"Shared storage lock timeout: {lock}")
-            time.sleep(_LOCK_POLL_S)
-
-
-def _release_lock():
-    try:
-        _lock_path().unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("Shared storage lock release error: %s", exc)
-
-
-@contextmanager
-def _locked_data():
-    _acquire_lock()
-    try:
-        data = read_dict_for_write(_path(), "Betárolva")
-        yield data
-        _atomic_write(data)
-    finally:
-        _release_lock()
+def _new_entry(row: dict, now: str | None = None) -> dict:
+    return {
+        "stored_at": now or datetime.now().isoformat(),
+        "stored_by": os.environ.get("USERNAME", "unknown"),
+        "stored_on": socket.gethostname(),
+        "snapshot": _to_snapshot(row or {}),
+    }
 
 
 def _to_snapshot(row: dict) -> dict:
@@ -223,122 +141,87 @@ def _from_snapshot(snap: dict) -> dict:
 
 
 def get_stored_awbs() -> set:
-    return set(load_stored().keys())
+    return set(_ledger.live().keys())
 
 
 def is_stored(awb: str) -> bool:
-    return awb in load_stored()
+    return awb in get_stored_awbs()
 
 
 def mark_stored(awb: str, row: dict):
-    with _locked_data() as data:
-        data[awb] = {
-            "stored_at": datetime.now().isoformat(),
-            "stored_by": os.environ.get("USERNAME", "unknown"),
-            "stored_on": socket.gethostname(),
-            "snapshot": _to_snapshot(row),
-        }
-    log.info("Betarolva: %s", awb)
+    set_stored(awb, row, True)
 
 
 def mark_many_stored(rows_by_awb: dict[str, dict]) -> tuple[int, set]:
-    """Store multiple AWBs in one locked shared-state write.
+    """Store multiple AWBs in one locked write.
 
     Returns (newly_stored_count, all_stored_awbs_after_write).
     """
     now = datetime.now().isoformat()
-    user = os.environ.get("USERNAME", "unknown")
-    host = socket.gethostname()
     stored_count = 0
-    with _locked_data() as data:
+    with _ledger.edit() as txn:
         for awb, row in (rows_by_awb or {}).items():
             awb_text = str(awb or "").strip()
-            if not awb_text or awb_text in data:
+            if not awb_text or txn.is_live(awb_text):
                 continue
-            data[awb_text] = {
-                "stored_at": now,
-                "stored_by": user,
-                "stored_on": host,
-                "snapshot": _to_snapshot(row or {}),
-            }
+            txn.put(awb_text, _new_entry(row, now))
             stored_count += 1
-        stored_awbs = set(data.keys())
+        stored_awbs = set(txn.live.keys())
     if stored_count:
         log.info("Betarolva kamionrol: %s tetel", stored_count)
     return stored_count, stored_awbs
 
 
 def mark_unstored(awb: str):
-    removed = False
-    with _locked_data() as data:
-        if awb in data:
-            del data[awb]
-            removed = True
+    set_stored(awb, {}, False)
+
+
+def mark_many_unstored(awbs) -> int:
+    """Remove several AWBs in one locked write. Returns the count."""
+    targets = {str(a or "").strip() for a in (awbs or ())} - {""}
+    if not targets:
+        return 0
+    removed = 0
+    with _ledger.edit() as txn:
+        for awb in targets:
+            if txn.delete(awb):
+                removed += 1
     if removed:
-        log.info("Visszarakva: %s", awb)
+        log.info("Visszarakva (kiadva): %s tetel", removed)
+    return removed
 
 
 def toggle_stored(awb: str, row: dict) -> tuple[bool, set]:
-    """Toggle one AWB in a single locked read/write cycle.
-
-    Returns (is_now_stored, all_stored_awbs_after_write).
-    """
-    with _locked_data() as data:
-        if awb in data:
-            del data[awb]
+    """Toggle one AWB. Prefer set_stored: a toggle on a stale card can undo
+    another user's change. Returns (is_now_stored, all_stored_awbs)."""
+    with _ledger.edit() as txn:
+        if txn.is_live(awb):
+            txn.delete(awb)
             is_now_stored = False
-            log.info("Visszarakva: %s", awb)
         else:
-            data[awb] = {
-                "stored_at": datetime.now().isoformat(),
-                "stored_by": os.environ.get("USERNAME", "unknown"),
-                "stored_on": socket.gethostname(),
-                "snapshot": _to_snapshot(row),
-            }
+            txn.put(awb, _new_entry(row))
             is_now_stored = True
-            log.info("Betarolva: %s", awb)
-        return is_now_stored, set(data.keys())
+        return is_now_stored, set(txn.live.keys())
 
 
 def set_stored(awb: str, row: dict, stored: bool) -> tuple[bool, set]:
     """Idempotently put one AWB into the requested stored state.
 
-    Unlike toggle_stored, a click made on a stale card (another user already
-    applied the same change) does not reverse that change.
+    A click made on a stale card (another user already applied the same
+    change) does not reverse that change.
     Returns (changed, all_stored_awbs_after_write).
     """
     changed = False
-    with _locked_data() as data:
-        if stored and awb not in data:
-            data[awb] = {
-                "stored_at": datetime.now().isoformat(),
-                "stored_by": os.environ.get("USERNAME", "unknown"),
-                "stored_on": socket.gethostname(),
-                "snapshot": _to_snapshot(row),
-            }
+    with _ledger.edit() as txn:
+        if stored and not txn.is_live(awb):
+            txn.put(awb, _new_entry(row))
             changed = True
             log.info("Betarolva: %s", awb)
-        elif not stored and awb in data:
-            del data[awb]
+        elif not stored and txn.is_live(awb):
+            txn.delete(awb)
             changed = True
             log.info("Visszarakva: %s", awb)
-        return changed, set(data.keys())
-
-
-def mark_many_unstored(awbs) -> int:
-    """Remove several AWBs in one locked shared-state write. Returns the count."""
-    targets = {str(a or "").strip() for a in (awbs or ())} - {""}
-    if not targets:
-        return 0
-    removed = 0
-    with _locked_data() as data:
-        for awb in targets:
-            if awb in data:
-                del data[awb]
-                removed += 1
-    if removed:
-        log.info("Visszarakva (kiadva): %s tetel", removed)
-    return removed
+        return changed, set(txn.live.keys())
 
 
 def get_snapshot_rows(exclude_awbs: set) -> list[dict]:
