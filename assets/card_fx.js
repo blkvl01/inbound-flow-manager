@@ -472,6 +472,15 @@
     prepareStoreAnimation(storeCard);
   }, { capture: true });
 
+  // Grid read-failure panel: "Újrapróbálás" reuses the header refresh button,
+  // so it gets the exact same manual-refresh path (and its disabled state).
+  document.addEventListener("click", function (e) {
+    var retry = e.target.closest("[data-action='refresh']");
+    if (!retry) return;
+    var refresh = document.getElementById("refresh-btn");
+    if (refresh && !refresh.disabled) refresh.click();
+  });
+
   document.addEventListener("click", function (e) {
     var truckBtn = e.target.closest(".truck-store-btn");
     if (!truckBtn) return;

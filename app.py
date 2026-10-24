@@ -5089,6 +5089,30 @@ def _cards_grid(cards, class_name: str = "cards-grid", empty_text: str = "Nincs 
     ])
 
 
+def _data_state_panel(kind: str, title: str, detail: str = "", meta: str = "",
+                      retry: bool = False) -> html.Div:
+    """One grid-level state: "empty" (source read fine, nothing active) or
+    "error" (source unreadable). Never both at once — the old gray empty text
+    plus red toast made a legit empty shift look like a failure."""
+    is_error = kind == "error"
+    return html.Div(
+        className=f"data-state data-state-{kind}",
+        role="alert" if is_error else "status",
+        children=[
+            html.Span(className=f"data-state-icon data-state-icon-{kind}", **{"aria-hidden": "true"}),
+            html.Div(className="data-state-text", children=[
+                html.Strong(title, className="data-state-title"),
+                html.Span(detail, className="data-state-detail") if detail else None,
+                html.Span(meta, className="data-state-meta") if meta else None,
+                html.Div(className="data-state-actions", children=[
+                    html.Button("Újrapróbálás", type="button", className="data-state-retry",
+                                **{"data-action": "refresh"}),
+                ]) if retry else None,
+            ]),
+        ],
+    )
+
+
 _CARDS_PAGE_SIZE = 12
 
 
@@ -5154,10 +5178,14 @@ _STAT_DEFS = [
 def _make_stat_btn(btn_id, _fkey, label, color, count_id):
     glow = color + "38" if color else None   # ~22% opacity hex alpha
     label_id = count_id.replace("scount", "slabel")
-    return html.Div(
+    # Real <button>: Tab-reachable, Enter/Space filter, aria-pressed mirrors the
+    # active filter (kept in sync by the active-filter clientside callback).
+    return html.Button(
         id=btn_id,
+        type="button",
         className="stat-item",
         n_clicks=0,
+        **{"aria-pressed": "true" if btn_id == "stat-btn-all" else "false"},
         style={"--stat-color": color, "--stat-glow": glow} if color else {},
         children=[
             html.Span(
@@ -8777,7 +8805,10 @@ def update_stat_counts(_poll, _store, flow_mode, priority_test_mode, current_dat
     )
     counts = _inbound_stat_counts(count_state)
     if counts["all"] == "–":
-        return "–", "–", "–", "–", "–", "–", "Aktív tétel", "AT/HU", "Sofőr helyszínen", "Nincs itt / pihenőn", "Kiadható", "Betárolt tételek"
+        # "–" only while there is no answer yet (cold load / read failure); a
+        # successful read with nothing active is a real zero.
+        v = "0" if state.get("status") == "ready" else "–"
+        return v, v, v, v, v, v, "Aktív tétel", "AT/HU", "Sofőr helyszínen", "Nincs itt / pihenőn", "Kiadható", "Betárolt tételek"
     return (
         counts["all"],
         counts["at_hu"],
@@ -8838,10 +8869,16 @@ app.clientside_callback(
         };
         Object.values(map).forEach(function(id) {
             var el = document.getElementById(id);
-            if (el) el.classList.remove("stat-active");
+            if (el) {
+                el.classList.remove("stat-active");
+                el.setAttribute("aria-pressed", "false");
+            }
         });
         var a = document.getElementById(map[f] || map["all"]);
-        if (a) a.classList.add("stat-active");
+        if (a) {
+            a.classList.add("stat-active");
+            a.setAttribute("aria-pressed", "true");
+        }
         window._flowActiveFilter = f;
         if (typeof window.applyFlowFilter === "function") {
             window.applyFlowFilter(f);
@@ -9048,15 +9085,26 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
         return _paged_cards_grid(cards, total, current, "cards-grid outbound-grid", "Nincs rakodás ebben a kategóriában."), html.Span(), ts, data_version
 
     if not test_active and state["status"] == "error":
-        err = html.Div(className="error-toast",
-                       children=state["errors"].get("error", "Ismeretlen hiba"))
-        return html.Div("Nincs megjeleníthető adat.", className="empty-state"), \
-               err, None, data_version
+        last_ok = state.get("last_success_refresh")
+        meta = (f"Utolsó sikeres beolvasás: {last_ok.strftime('%H:%M')}" if last_ok
+                else "Még nem volt sikeres beolvasás")
+        panel = _data_state_panel(
+            "error", "Az adatforrás nem olvasható",
+            detail=(state.get("errors") or {}).get("error", "Ismeretlen hiba"),
+            meta=meta + " · automatikus újrapróba folyamatban", retry=True,
+        )
+        return panel, html.Span(), None, data_version
 
     df = _priority_test_df() if test_active else _apply_live_arrival_state(state["df"])
     if df is None or df.empty:
-        return html.Div("Nincs aktív tétel.", className="empty-state"), \
-               html.Span(), None, data_version
+        read_at = state.get("last_refresh")
+        meta = f"E_COMM beolvasva {read_at.strftime('%H:%M:%S')}" if read_at else ""
+        panel = _data_state_panel(
+            "empty", "Nincs aktív tétel",
+            detail="A forrás rendben beolvasva, jelenleg nincs várakozó inbound tétel.",
+            meta=(meta + " · a lista automatikusan frissül") if meta else "A lista automatikusan frissül",
+        )
+        return panel, html.Span(), ts, data_version
 
     live_awbs = set(df["awb"].tolist())
     today = datetime.now().date()

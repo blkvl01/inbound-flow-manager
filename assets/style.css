@@ -31561,3 +31561,160 @@ body.theme-light .legend-bar { background-color: rgba(242,246,252,0.94); }
   .kpi-mode-btn.is-active { animation: none !important; }
   .cards-page-btn { transition: none; }
 }
+
+/* ============================================================
+   UX audit pass (2026-10-24): data states, strip contrast, focus
+   Appended last on purpose: wins the cascade over the duplicated
+   earlier blocks without touching them.
+   ============================================================ */
+
+:root {
+  --strip-ink: #0a1420;
+  --focus-ring: #a5cfff;
+  --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E");
+  --icon-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M12 6.5v7M12 17.5h.01'/%3E%3C/svg%3E");
+}
+
+/* ─── Grid data state: empty (neutral) vs read failure ─────── */
+.data-state {
+  display: flex; align-items: flex-start; gap: 14px;
+  max-width: 560px; margin: 64px auto 0; padding: 18px 20px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(14,18,30,0.72);
+  text-align: left;
+}
+.data-state-error {
+  border-color: rgba(255,107,120,0.42);
+  background: rgba(40,10,16,0.78);
+}
+.data-state-icon {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center;
+}
+.data-state-icon::after {
+  content: ""; width: 16px; height: 16px; background-color: currentColor;
+  -webkit-mask: var(--icon-check) center / contain no-repeat;
+          mask: var(--icon-check) center / contain no-repeat;
+}
+.data-state-icon-empty { color: #34e0b0; background: rgba(52,224,176,0.14); }
+.data-state-icon-error { color: #ff9aa4; background: rgba(255,107,120,0.16); }
+.data-state-icon-error::after {
+  -webkit-mask-image: var(--icon-alert);
+          mask-image: var(--icon-alert);
+}
+.data-state-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.data-state-title { font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.data-state-detail { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.data-state-meta { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.data-state-error .data-state-detail { color: #ffc2c8; }
+.data-state-actions { margin-top: 8px; display: flex; gap: 8px; }
+.data-state-retry {
+  font: inherit; font-size: 12.5px; font-weight: 700;
+  min-height: 32px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  color: #1a0a0e; background: #ffd4d8; border: 1px solid #ffd4d8;
+  transition: background 0.18s ease, transform 0.14s ease;
+}
+.data-state-retry:hover { background: #ffffff; }
+.data-state-retry:active { transform: scale(0.97); }
+.data-state-retry:focus-visible { outline: 2px solid #ffd4d8; outline-offset: 3px; }
+body.theme-light .data-state { background: rgba(255,255,255,0.92); border-color: rgba(15,23,42,0.14); }
+body.theme-light .data-state-error { background: #fff1f2; border-color: #fda4af; }
+body.theme-light .data-state-title { color: #0f172a; }
+body.theme-light .data-state-detail,
+body.theme-light .data-state-meta { color: #334155; }
+body.theme-light .data-state-error .data-state-detail { color: #9f1239; }
+body.theme-light .data-state-icon-empty { color: #047857; }
+body.theme-light .data-state-icon-error { color: #be123c; }
+
+/* ─── Card strip: dark ink on the saturated category colours ─
+   White on teal/orange/blue/grey measured 1.7-3.0:1; dark ink is >= 4.8:1
+   on every _COLOR / stored strip colour. En-route keeps its own styling. */
+.priority-card:not(.pcard-en-route) .card-strip .priority-label-text {
+  color: var(--strip-ink) !important;
+  text-shadow: none !important;
+}
+.priority-card:not(.pcard-en-route) .card-strip .rank-num,
+.priority-card:not(.pcard-en-route) .card-strip .badge-shippable,
+.priority-card:not(.pcard-en-route) .card-strip .badge-cargo,
+.priority-card:not(.pcard-en-route) .card-strip .badge-aged,
+.priority-card:not(.pcard-en-route) .card-strip .badge-note {
+  color: var(--strip-ink) !important;
+  background: rgba(255,255,255,0.34) !important;
+  border-color: rgba(10,20,32,0.22) !important;
+  text-shadow: none !important;
+}
+
+/* "Betárolva" action on the strip: white .72 on black .36 was 4.3:1 on grey
+   and lower on teal; a denser chip keeps it >= 6:1 on every strip colour. */
+.priority-card:not(.pcard-en-route) .card-strip .badge-stored-empty {
+  color: #ffffff;
+  background: rgba(0,0,0,0.48);
+}
+.priority-card:not(.pcard-en-route) .card-strip .badge-stored-empty:hover {
+  color: #fbbf24;
+  background: rgba(0,0,0,0.62);
+}
+
+/* B2B weight inherits the strip red inline (4.4:1 on the card); lift it. */
+.priority-card.pcard-b2b .weight-text { color: #f87171 !important; }
+
+/* ─── Prepared ULD rows: fade the identity, never the deadline ─ */
+.uld-row.uld-row-prepared,
+.uld-row[data-prepared="1"],
+body.flow-uld-mode .uld-row.uld-row-prepared,
+.uld-row.uld-row-prepared:hover,
+body.flow-uld-mode .uld-row.uld-row-prepared:hover {
+  opacity: 1 !important;
+  filter: none !important;
+}
+.uld-row.uld-row-prepared > :not(.uld-countdown),
+.uld-row[data-prepared="1"] > :not(.uld-countdown) {
+  opacity: .75;
+  filter: saturate(.5);
+  transition: opacity .42s cubic-bezier(0.22,1,0.36,1), filter .42s ease;
+}
+.uld-row.uld-row-prepared:hover > :not(.uld-countdown),
+.uld-row[data-prepared="1"]:hover > :not(.uld-countdown) {
+  opacity: .9;
+  filter: saturate(.85);
+}
+
+/* Prepared stacks: dashed border + desaturation stay the lock cue, but the
+   header (count, Kijelölés, KIADÁS) must remain readable. */
+.uld-stack.uld-stack-prepared,
+body.flow-uld-mode .uld-stack.uld-stack-prepared,
+.uld-stack[data-prepared="1"] {
+  opacity: .85 !important;
+}
+/* Muted (#8797b1) on the stack glass measured ~3.7:1; hover/selected/
+   prep/dispatch variants are more specific and keep their own colours. */
+body.flow-uld-mode .uld-stack-act { color: var(--text-secondary); }
+.uld-stack-cnt:not(.uld-stack-cnt-warn) { color: var(--text-secondary); }
+
+/* ─── Keyboard focus ────────────────────────────────────────
+   Zero-specificity baseline ring for every control that has none of its
+   own; component rules that already style :focus-visible still win. */
+:where(button, summary, a[href], [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+/* Stat filters are real buttons now: drop the UA button chrome only where
+   .stat-item itself sets nothing (zero specificity). */
+:where(button.stat-item) {
+  font: inherit; color: inherit; text-align: left; letter-spacing: inherit;
+  background: none; margin: 0; -webkit-appearance: none; appearance: none;
+}
+.stat-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  background: rgba(255,255,255,0.06);
+}
+.badge-stored:focus-visible {
+  outline: 2px solid var(--focus-ring) !important;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .data-state-retry,
+  .uld-row.uld-row-prepared > :not(.uld-countdown) { transition: none; }
+}

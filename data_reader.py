@@ -3062,7 +3062,9 @@ def load_data(
                 "hard_read_failure": True,
             }, kpi_data, uld_data
         # No failure flag → E_COMM read fine, there are simply no active items.
-        return pd.DataFrame(), {"error": "Nincs aktív tétel, vagy az E_COMM fájl nem olvasható."}, kpi_data, uld_data
+        # Deliberately NOT an "error": the cache marks the read ready and the UI
+        # shows a neutral empty state instead of a red read-failure box.
+        return pd.DataFrame(), {"no_active_items": True}, kpi_data, uld_data
 
     now = datetime.now()
     # GLABS shippable stats use the same ready-status rule as E_COMM.
