@@ -17,14 +17,21 @@
         return target && target.closest && target.closest('.badge-stored-empty, .badge-stored-active, .truck-store-btn, #refresh-btn');
     }
 
+    // Button text is React-owned: never write textContent (it detaches
+    // React's text node). Pending state = class + aria-busy (CSS spinner).
+    // The refresh button's `disabled` is owned by the server
+    // (update_loading_state -> refresh-btn.disabled); only store buttons are
+    // locked here.
+    var SAFETY_UNLOCK_MS = 60000;
+    var NETWORK_UNLOCK_MS = 30000;
+
     function paint(entry, button) {
         if (!button || !button.isConnected) return;
-        if (button.dataset.actionPending !== '1') button.dataset.idleText = button.textContent || '';
         button.dataset.actionPending = '1';
         button.classList.add('action-pending');
         button.setAttribute('aria-busy', 'true');
-        button.textContent = entry.refresh ? 'Folyamatban...' : 'Mentés...';
         entry.buttons.add(button);
+        if (entry.refresh) return;
         // Let React/Dash receive the first click before disabling its native target.
         setTimeout(function () { if (pending.get(entry.key) === entry) button.disabled = true; }, 0);
     }
@@ -32,15 +39,15 @@
     function release(entry) {
         if (pending.get(entry.key) !== entry) return;
         pending.delete(entry.key);
+        clearTimeout(entry.safetyTimer);
+        clearTimeout(entry.networkTimer);
         var status = document.getElementById('flow-action-status');
         if (status && (status.dataset.actionToken === entry.token || status.dataset.actionKey === entry.key)) status.remove();
         entry.buttons.forEach(function (button) {
             button.dataset.actionPending = '0';
             button.classList.remove('action-pending');
             button.removeAttribute('aria-busy');
-            button.disabled = false;
-            button.style.opacity = '';
-            if (button.dataset.idleText) button.textContent = button.dataset.idleText;
+            if (!entry.refresh) button.disabled = false;
         });
     }
 
@@ -51,12 +58,23 @@
             status.id = 'flow-action-status';
             status.className = 'error-toast';
             status.setAttribute('role', 'alert');
+            var text = document.createElement('span');
+            text.className = 'flow-action-status-text';
+            var close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'flow-action-status-close';
+            close.setAttribute('aria-label', 'Bezárás');
+            close.textContent = 'Bezár';
+            close.style.cssText = 'flex:none;background:none;border:1px solid currentColor;border-radius:6px;color:inherit;font:inherit;padding:3px 9px;cursor:pointer';
+            close.addEventListener('click', function () { status.remove(); });
+            status.appendChild(text);
+            status.appendChild(close);
             document.body.appendChild(status);
         }
-        status.textContent = message;
+        status.querySelector('.flow-action-status-text').textContent = message;
         status.dataset.actionToken = entry ? entry.token : '';
         status.dataset.actionKey = entry ? entry.key : '';
-        status.style.cssText = 'position:fixed;bottom:20px;left:20px;right:20px;z-index:10000';
+        status.style.cssText = 'position:fixed;right:20px;bottom:20px;left:auto;max-width:420px;margin:0;z-index:10000;display:flex;align-items:center;gap:12px';
     }
 
     document.addEventListener('click', function (event) {
@@ -83,6 +101,14 @@
                 reportError('A művelet indítása késik. Várj a befejezésre; az állapot ellenőrzéséhez újratöltheted az oldalt.', entry);
             }
         }, 15000);
+        // Never leave a button locked forever. A refresh is idempotent; for a
+        // store toggle the card has re-rendered with its real state by now.
+        entry.safetyTimer = setTimeout(function () {
+            if (pending.get(key) !== entry) return;
+            var refresh = entry.refresh;
+            release(entry);
+            if (!refresh) reportError('Az állapot nem igazolt. Nézd meg a kártyát, és ha kell, próbáld újra.', entry);
+        }, SAFETY_UNLOCK_MS);
     }, true);
 
     var originalFetch = window.fetch;
@@ -129,8 +155,16 @@
             return response;
         }, function (error) {
             entry.requestDone = true;
-            // An uncertain outcome must not become an accidental second toggle.
-            reportError('A kapcsolat megszakadt. Az állapot ellenőrzéséhez töltsd újra az oldalt.', entry);
+            if (entry.refresh) {
+                // Refresh is idempotent: unlock right away.
+                release(entry);
+                reportError('A frissítés indítása nem sikerült. Próbáld újra.', entry);
+                throw error;
+            }
+            // An uncertain outcome must not become an accidental second toggle:
+            // stay locked until the poll has re-rendered the real state.
+            reportError('A kapcsolat megszakadt. Pár másodperc múlva a kártya a valós állapotot mutatja.', entry);
+            entry.networkTimer = setTimeout(function () { release(entry); }, NETWORK_UNLOCK_MS);
             throw error;
         });
     };

@@ -20,8 +20,14 @@
   var lastOpenTs = 0;
   var fillSettleTimer = 0;
   var bandsHostIds = ["kpi-bands-summary", "kpi-bands-chart", "kpi-bands-grid"];
+  // true only when the user explicitly navigated to a non-today day; otherwise the
+  // view follows today (also across midnight).
+  var userPickedDay = false;
   function activeBands() { return !window.__kpiActiveSubview || window.__kpiActiveSubview() === "tracking"; }
-  window.__unmountKpiBands = function () {
+  // resetLatches: true only when the KPI page itself is left. A hidden window or a
+  // subview switch releases the DOM but keeps the "opening already played" latch,
+  // so the remount snaps to the final state instead of replaying the opening.
+  window.__unmountKpiBands = function (resetLatches) {
     if (revealObserver) revealObserver.disconnect();
     revealObserver = null;
     clearTimeout(openingTimer);
@@ -29,7 +35,10 @@
     openingTimer = fillSettleTimer = 0;
     lastRenderSig = lastCountSig = "";
     revealArmed = false;
-    revealed = false;
+    if (resetLatches) {
+      revealed = false;
+      userPickedDay = false;
+    }
     var section = document.querySelector(".kpi-bands-section");
     if (section) section.classList.remove("is-opening", "kpi-reveal-pending");
     if (window.__clearKpiHosts) window.__clearKpiHosts(bandsHostIds);
@@ -688,8 +697,12 @@
       groupCard("quiet", "Quietest", info.lowIn, info.lowOut);
   }
 
+  // animate: true = opening grow from 0; false = selection (bars snap, detail rows
+  // regrow); "snap" = data refresh / remount (everything snaps, nothing replays).
   function playFill(root, animate) {
     if (!root) return;
+    var snapAll = animate === "snap";
+    animate = animate === true;
     var bars = root.querySelectorAll(".kpi-bands-bar[data-h]");
     var rows = root.querySelectorAll(".kpi-bands-row-bar > i[data-w]");
     var immediate = !animate || reduceMotion();
@@ -698,7 +711,7 @@
       fillSettleTimer = 0;
     }
     if (immediate) {
-      var animateRowsOnly = !animate && !reduceMotion();
+      var animateRowsOnly = !animate && !snapAll && !reduceMotion();
       // Snap to final size with no grow-from-0. On a selection re-render the chart
       // is rebuilt; without this the bars would regrow on every click and swamp the
       // selection "pop". The opening reveal (animate=true) still grows them.
@@ -815,13 +828,14 @@
     if (reduceMotion()) {
       revealed = true;
       section.classList.add("is-revealed");
-      playFill(section, false);
+      playFill(section, "snap");
       runCounts(section, false);
       return;
     }
     if (revealed) {
+      section.classList.remove("kpi-reveal-pending");
       section.classList.add("is-revealed");
-      playFill(section, false);
+      playFill(section, "snap");
       runCounts(section, false);
       return;
     }
@@ -844,7 +858,34 @@
     }
   }
 
-  function render(animateIfVisible) {
+  // innerHTML rebuild drops the focused hour column / band card: remember it by
+  // its data key and focus the rebuilt twin (keyboard users keep their place).
+  function focusKeyIn(hosts) {
+    var active = document.activeElement;
+    if (!active || !active.closest) return null;
+    for (var i = 0; i < hosts.length; i++) {
+      if (!hosts[i] || !hosts[i].contains(active)) continue;
+      var col = active.closest("[data-hour-key]");
+      if (col) return { host: hosts[i], attr: "data-hour-key", val: col.getAttribute("data-hour-key") };
+      var card = active.closest("[data-band-key]");
+      if (card) return { host: hosts[i], attr: "data-band-key", val: card.getAttribute("data-band-key") };
+    }
+    return null;
+  }
+
+  function restoreFocusKey(ref) {
+    if (!ref || ref.val == null) return;
+    var nodes = ref.host.querySelectorAll("[" + ref.attr + "]");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute(ref.attr) !== ref.val) continue;
+      try { nodes[i].focus({ preventScroll: true }); } catch (err) { try { nodes[i].focus(); } catch (e2) {} }
+      return;
+    }
+  }
+
+  // mode: true = deliberate view change (day/metric) grows the bars; false =
+  // selection; "snap" = data refresh / remount, never replays the opening.
+  function render(mode) {
     if (!activeBands()) return;
     var section = document.querySelector(".kpi-bands-section");
     var chartHost = document.getElementById("kpi-bands-chart");
@@ -881,13 +922,15 @@
       subEl.textContent = "Hourly chart with 4-hour band cards / " +
         dateLabel(day.date) + (day.is_today ? " / Today marker active" : " / Historical view");
     }
+    var refocus = focusKeyIn([chartHost, gridHost]);
     sumHost.innerHTML = summaryHtml(info);
     chartHost.innerHTML = chartHtml(hours, maxVal);
     gridHost.innerHTML = gridHtml(details, detailMax, dayWeight);
+    restoreFocusKey(refocus);
 
     if (revealed) {
-      playFill(section, !!animateIfVisible);
-      runCounts(section, !!animateIfVisible);
+      playFill(section, mode === "snap" ? "snap" : mode === true);
+      runCounts(section, mode === true);
     } else {
       armReveal();
     }
@@ -963,6 +1006,7 @@
       var clamped = Math.max(0, Math.min(days().length - 1, nextIndex));
       if (clamped !== dayIndex) {
         dayIndex = clamped;
+        userPickedDay = !(days()[dayIndex] && days()[dayIndex].is_today);
         selected = Object.create(null);
         lastRenderSig = "";
         lastCountSig = "";
@@ -998,6 +1042,7 @@
     var clamped = Math.max(0, Math.min(days().length - 1, nextIndex));
     if (clamped === dayIndex) return;
     dayIndex = clamped;
+    userPickedDay = !(days()[dayIndex] && days()[dayIndex].is_today);
     selected = Object.create(null);
     lastRenderSig = "";
     lastCountSig = "";
@@ -1055,19 +1100,27 @@
 
   window.__renderKpiBands = function (data) {
     if (!activeBands()) return;
-    var keepDate = currentDay() && currentDay().date;
+    var keepDate = payload ? (currentDay() && currentDay().date) : "";
     payload = normalizePayload(data || {});
     var list = days();
     var preferred = todayIndex();
-    if (keepDate) {
+    // Follow today unless the user explicitly picked another day; then keep that
+    // date. After midnight the old "today" stays in days[], so keeping it blindly
+    // would leave the view stuck on yesterday.
+    if (userPickedDay && keepDate) {
+      var found = false;
       for (var i = 0; i < list.length; i++) {
         if (list[i] && list[i].date === keepDate) {
           preferred = i;
+          found = true;
           break;
         }
       }
+      if (!found) userPickedDay = false;
     }
     dayIndex = Math.max(0, Math.min(list.length - 1, preferred));
+    var shownDay = list[dayIndex];
+    if (keepDate && shownDay && shownDay.date !== keepDate) selected = Object.create(null);
     var sig = signature(payload);
     if (sig === lastRenderSig && document.querySelector(".kpi-bands-col")) {
       armReveal();
@@ -1075,7 +1128,9 @@
     }
     lastRenderSig = sig;
     lastCountSig = "";
-    render(revealed);
+    // Data refresh / remount: snap to the new values. The opening grow only runs
+    // from revealSection (first arrival per KPI page entry).
+    render("snap");
     if (window.__markKpiHosts) window.__markKpiHosts(bandsHostIds);
   };
 
@@ -1111,7 +1166,10 @@
   // are invisible during the scroll approach (not just after settle).
   window.addEventListener("kpi-segment-changing", function () {
     var section = document.querySelector(".kpi-bands-section");
-    if (!section || reduceMotion()) return;
+    // Once the opening has played it is never replayed this KPI entry (the settle
+    // handler only replays while !revealed), so hiding here would leave the panel
+    // blank after any snap navigation.
+    if (!section || reduceMotion() || revealed) return;
     if (section.classList.contains("is-revealed") || section.classList.contains("is-opening")) {
       if (openingTimer) { clearTimeout(openingTimer); openingTimer = 0; }
       section.classList.remove("is-revealed", "is-opening");

@@ -273,6 +273,22 @@ class UldApiHelperTests(unittest.TestCase):
             ["PMD34212MB", "PMD34353MB"],
         )
 
+    def test_parse_uld_numbers_drops_sea_container_numbers(self):
+        self.assertEqual(data_reader._parse_uld_numbers("CMAU6754208"), [])
+        self.assertEqual(data_reader._parse_uld_numbers("FFAU4542846,PMC12345LH"), ["PMC12345LH"])
+
+    def test_parse_uld_numbers_drops_short_fragments(self):
+        for raw in ("MG3", "CECZ", "PMC72134", "112-04958634"):
+            self.assertEqual(data_reader._parse_uld_numbers(raw), [], raw)
+
+    def test_parse_uld_numbers_joins_space_separated_code(self):
+        self.assertEqual(data_reader._parse_uld_numbers("PMC 34464 R9"), ["PMC34464R9"])
+        self.assertEqual(data_reader._parse_uld_numbers("AKE12345LH 2 db"), ["AKE12345LH"])
+
+    def test_parse_uld_numbers_keeps_typo_ulds_unchanged(self):
+        self.assertEqual(data_reader._parse_uld_numbers("PG25701TK-43 (235-98163715-9)"), ["PG25701TK"])
+        self.assertEqual(data_reader._parse_uld_numbers("PM075955QR"), ["PM075955QR"])
+
     def test_parse_uld_numbers_normalizes_cyrillic_o_from_excel(self):
         self.assertEqual(data_reader._parse_uld_numbers("PAG18804\u041e3"), ["PAG18804O3"])
 

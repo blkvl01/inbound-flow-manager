@@ -422,6 +422,7 @@
   var flowDayMetric = "kg";
   var flowDayPayload = null;
   var flowDaySelected = -1;
+  var flowDaySelectedDate = "";   // stable key of flowDaySelected (row.date)
   var flowDayRenderSig = "";
   var flowDayTransitioning = false;
   var flowDaySummaryLast = {};
@@ -432,6 +433,7 @@
   // Selections remain in the existing module state, rather than detached nodes.
   var latestPagePayload = null;
   var mountedSubview = null;
+  var kpiWasEntered = false;
   var lifecycleTimer = 0;
   var trackingMountGeneration = 0;
 
@@ -465,7 +467,10 @@
     ids.forEach(function (id) { var host = document.getElementById(id); if (host) host.__kpiJsOwned = true; });
   };
 
-  function unmountTracking() {
+  // The DOM is always released (hidden window / subview switch / page leave), but the
+  // "opening already played" latches are reset only when the KPI page itself is left
+  // (resetLatches). Otherwise the remount snaps to the final state, no replay.
+  function unmountTracking(resetLatches) {
     trackingMountGeneration += 1;
     window.__stopKpiWork(document.querySelector(".kpi-subpage-tracking"));
     [countObserver, pageChartObserver, trackingObserver].forEach(function (observer) { if (observer) observer.disconnect(); });
@@ -479,28 +484,52 @@
       section.classList.remove("is-opening", "kpi-reveal-pending");
     }
     window.__clearKpiHosts(trackingHostIds);
-    if (window.__unmountKpiBands) window.__unmountKpiBands();
+    if (window.__unmountKpiBands) window.__unmountKpiBands(resetLatches);
     flowRenderSig = {};
-    flowChartStartedSig = {};
     flowChartPendingSig = {};
     flowDayRenderSig = "";
     lastTrackingSig = "";
     trackingLastValueSig = "";
-    countLastByKey = {};
-    trackingOpened = trackingRevealPending = false;
+    trackingRevealPending = false;
     flowDayTransitioning = false;
+    if (resetLatches) {
+      flowChartStartedSig = {};
+      countLastByKey = {};
+      trackingOpened = false;
+    }
   }
 
   function applyPagePayload() {
     var active = window.__kpiActiveSubview();
     if (mountedSubview && mountedSubview !== active) {
-      if (mountedSubview === "tracking") unmountTracking();
+      // Leaving the KPI page resets the opening latches; a hidden window or a
+      // tracking/report switch keeps them (remount = snapped, no replay).
+      var leavingKpi = !document.body || !document.body.classList.contains("view-kpi-mode");
+      if (mountedSubview === "tracking") unmountTracking(leavingKpi);
       else {
-        if (window.__unmountKpiTrend) window.__unmountKpiTrend();
-        if (window.__unmountKpiTemu) window.__unmountKpiTemu();
+        if (window.__unmountKpiTrend) window.__unmountKpiTrend(leavingKpi);
+        if (window.__unmountKpiTemu) window.__unmountKpiTemu(leavingKpi);
       }
       mountedSubview = null;
     }
+    // The inactive subview was unmounted earlier (subview switch) with its latches
+    // kept, so on leaving the KPI page reset the latches of BOTH subviews; otherwise
+    // the next KPI entry would skip that subview's opening.
+    var inKpi = !!document.body && document.body.classList.contains("view-kpi-mode");
+    if (kpiWasEntered && !inKpi) {
+      flowChartStartedSig = {};
+      countLastByKey = {};
+      trackingOpened = false;
+      // A pinned Shift-chart point does not follow the user back into KPI.
+      trackingHostIds.forEach(function (id) {
+        var h = document.getElementById(id);
+        if (h) h.__kpiPin = null;
+      });
+      if (window.__unmountKpiBands) window.__unmountKpiBands(true);
+      if (window.__unmountKpiTrend) window.__unmountKpiTrend(true);
+      if (window.__unmountKpiTemu) window.__unmountKpiTemu(true);
+    }
+    kpiWasEntered = inKpi;
     if (!active || !latestPagePayload) return;
     var payload = latestPagePayload;
     var updated = document.getElementById("kpi-page-updated");
@@ -824,7 +853,7 @@
     document.querySelectorAll(".kpi-flow-mode-btn[data-flow-mode]").forEach(function (btn) {
       var on = btn.getAttribute("data-flow-mode") === flowMode;
       btn.classList.toggle("is-on", on);
-      btn.setAttribute("aria-selected", on ? "true" : "false");
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
     var modeCtl = document.getElementById("kpi-flow-mode-control");
     if (modeCtl) {
@@ -845,7 +874,7 @@
     document.querySelectorAll(".kpi-flow-period-btn[data-flow-days]").forEach(function (btn) {
       var on = String(flowDayRange) === btn.getAttribute("data-flow-days");
       btn.classList.toggle("is-on", on);
-      btn.setAttribute("aria-selected", on ? "true" : "false");
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
     var ctl = document.getElementById("kpi-flow-period-control");
     if (ctl) {
@@ -864,7 +893,7 @@
     document.querySelectorAll(".kpi-flow-unit-btn[data-flow-unit]").forEach(function (btn) {
       var on = btn.getAttribute("data-flow-unit") === flowDayMetric;
       btn.classList.toggle("is-on", on);
-      btn.setAttribute("aria-selected", on ? "true" : "false");
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
     var ctl = document.getElementById("kpi-flow-unit-control");
     if (ctl) {
@@ -915,7 +944,15 @@
     var host = document.getElementById("kpi-flow-day-chart");
     if (!host) return;
     var rows = flowDayRows(flowDayPayload);
-    if (flowDaySelected >= rows.length) flowDaySelected = -1;
+    // The selection is keyed by date: the 7/14-day window slides at midnight, so the
+    // same index would silently point at the next day.
+    if (flowDaySelected >= 0) {
+      var selIdx = -1;
+      for (var si = 0; si < rows.length; si++) {
+        if (rows[si].date === flowDaySelectedDate) { selIdx = si; break; }
+      }
+      flowDaySelected = selIdx;
+    }
     updateDaySummary(rows, flowDaySelected);
     var sig = flowDaySignature(flowDayPayload);
     if (!force && flowDayRenderSig === sig && host.firstChild) return;
@@ -1106,6 +1143,8 @@
   function wireDayHover(host, rows, inPts, outPts) {
     var svg = host.querySelector("svg");
     if (!svg) return;
+    var labelEls = Array.prototype.slice.call(host.querySelectorAll(".kpi-flow-day-val-label"));
+    var dotEls = Array.prototype.slice.call(host.querySelectorAll(".kpi-flow-day-dot"));
     function idxFromEvent(event) {
       var rect = svg.getBoundingClientRect();
       if (!rect.width) return -1;
@@ -1139,10 +1178,10 @@
           '<span><i class="inbound"></i>' + esc(fmtFlowDayValue(rows[idx].inbound)) + '</span>' +
           '<span><i class="outbound"></i>' + esc(fmtFlowDayValue(rows[idx].outbound)) + '</span>';
       }
-      host.querySelectorAll(".kpi-flow-day-val-label").forEach(function (lbl) {
+      labelEls.forEach(function (lbl) {
         lbl.classList.toggle("is-active", Number(lbl.getAttribute("data-day-index")) === idx);
       });
-      host.querySelectorAll(".kpi-flow-day-dot").forEach(function (dot) {
+      dotEls.forEach(function (dot) {
         var dotIdx = Number(dot.getAttribute("data-day-index"));
         var isSel = persistent ? dotIdx === idx : (flowDaySelected >= 0 && dotIdx === flowDaySelected);
         var isHov = !persistent && dotIdx === idx;
@@ -1170,15 +1209,32 @@
         lbl.classList.remove("is-active");
       });
     }
+    // Hover is coalesced to one paint per frame and skipped while the
+    // nearest day stays the same.
+    var hoverIdx = -1, hoverFrame = 0, hoverEvent = null;
     svg.addEventListener("mousemove", function (event) {
-      var idx = idxFromEvent(event);
-      if (idx >= 0) paintSelection(idx, false);
+      hoverEvent = { clientX: event.clientX };
+      if (hoverFrame) return;
+      hoverFrame = requestAnimationFrame(function () {
+        hoverFrame = 0;
+        if (!hoverEvent) return;
+        var idx = idxFromEvent(hoverEvent);
+        if (idx < 0 || idx === hoverIdx) return;
+        hoverIdx = idx;
+        paintSelection(idx, false);
+      });
     });
-    svg.addEventListener("mouseleave", restoreSelection);
+    svg.addEventListener("mouseleave", function () {
+      hoverIdx = -1;
+      hoverEvent = null;
+      restoreSelection();
+    });
     svg.addEventListener("click", function (event) {
+      hoverIdx = -1;
       var idx = idxFromEvent(event);
       if (idx < 0 || idx >= rows.length) return;
       flowDaySelected = flowDaySelected === idx ? -1 : idx;
+      flowDaySelectedDate = flowDaySelected >= 0 ? rows[idx].date : "";
       updateDaySummary(rows, flowDaySelected);
       restoreSelection();
     });
@@ -1657,6 +1713,10 @@
       if (!detail) return;
       if (pinned === idx) { closeDetail(); return; }
       pinned = idx;
+      // Keep the pin on the host by a stable key (chart sig + hour label):
+      // a live kg change rebuilds the SVG and this closure, and wireHover
+      // re-opens the same hour instead of silently dropping the panel.
+      host.__kpiPin = { sig: host.__kpiDrawnSig, label: String(labels[idx] || "") };
       var cp = pts[idx];
       var cumulative = 0;
       for (var i = 0; i <= idx; i++) cumulative += Number((hours[i] || {}).kg) || 0;
@@ -1666,7 +1726,7 @@
       var stateText = hourObj.current ? "Current hour"
         : (hourObj.active ? "Closed hour" : "No data yet");
       detail.innerHTML =
-        '<button class="kpi-page-detail-close" aria-label="Close">×</button>' +
+        '<button class="kpi-page-detail-close" aria-label="Close"><span class="fi fi-x" aria-hidden="true"></span></button>' +
         '<div class="kpi-page-detail-h">' + esc(labels[idx] || "") + ':00 · ' + esc(stateText) + '</div>' +
         '<div class="kpi-page-detail-row"><span>This hour</span><b>' + esc(fmtKg(cp.kg)) + '</b></div>' +
         '<div class="kpi-page-detail-row"><span>Of shift</span><b>' + fmtPercent(share) + '</b></div>' +
@@ -1680,7 +1740,8 @@
 
     function closeDetail() {
       pinned = -1;
-      if (detail) { detail.style.opacity = "0"; detail.classList.remove("is-open"); }
+      host.__kpiPin = null;
+      if (detail) { detail.style.opacity = "0"; detail.classList.remove("is-open"); detail.style.animation = ""; }
       hide();
     }
 
@@ -1692,6 +1753,28 @@
       detail.addEventListener("click", function (event) {
         if (event.target.closest(".kpi-page-detail-close")) closeDetail();
       });
+    }
+
+    // Restore a pin that survived the rebuild: same chart (view + shift)
+    // and the hour still exists. No pop-in animation on the restore.
+    var keep = host.__kpiPin;
+    if (keep && detail) {
+      var keepIdx = keep.sig === host.__kpiDrawnSig ? labels.map(String).indexOf(keep.label) : -1;
+      if (keepIdx >= 0 && pts[keepIdx]) {
+        var quiet = [detail, tip, line, curDot];
+        quiet.forEach(function (el) { el.style.transition = "none"; });
+        // The pop keyframe stays off until close; re-enabling it while
+        // .is-open is set would replay it.
+        detail.style.animation = "none";
+        openDetail(keepIdx);
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            quiet.forEach(function (el) { el.style.transition = ""; });
+          });
+        });
+      } else {
+        host.__kpiPin = null;
+      }
     }
   }
 
@@ -2115,7 +2198,7 @@
   }
 
   function fillTrackingDetail(host, group) {
-    host.innerHTML = '<button class="kpi-detail-close" aria-label="Close">×</button>' +
+    host.innerHTML = '<button class="kpi-detail-close" aria-label="Close"><span class="fi fi-x" aria-hidden="true"></span></button>' +
       '<div class="kpi-detail-body">' + trackingGroupDetailHtml(group) + '</div>';
   }
 

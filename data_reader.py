@@ -590,7 +590,7 @@ def _parse_rest_text(rest_raw, driver_checkin: Optional[datetime]) -> tuple[bool
 # "lejárt!" / overdue treatment) for another 12h instead of silently vanishing.
 _ULD_EXPIRY_HOURS = 48.0
 _ULD_ACTIVE_CUTOFF_HOURS = 60.0
-ULD_DATA_PARSER_VERSION = 10
+ULD_DATA_PARSER_VERSION = 11
 
 _ULD_CONFUSABLES = str.maketrans({
     "А": "A", "В": "B", "С": "C", "Е": "E", "Н": "H", "К": "K",
@@ -638,14 +638,35 @@ def _has_valid_uld_prefix(uld: str) -> bool:
     return any(c.isalpha() for c in uld[:3])
 
 
+# IATA ULD: 3-letter type + 4-5 digit serial + 2-3 char owner (AKE12345LH, PMC20257YAA).
+_ULD_CODE_RE = re.compile(r"[A-Z]{3}\d{4,5}[A-Z0-9]{2,3}")
+# ISO 6346 sea container (CMAU6754208). Sea-freight rows write the container
+# number into the same "ULD azonosító" column; it is never a ULD.
+_CONTAINER_CODE_RE = re.compile(r"[A-Z]{3}[UJZ]\d{6,7}")
+
+
+def _is_container_code(code: str) -> bool:
+    return bool(_CONTAINER_CODE_RE.fullmatch(code or ""))
+
+
+def _is_near_uld_code(code: str) -> bool:
+    """Typo'd but clearly ULD-shaped code (PG25701TK, PM075955QR).
+
+    Kept as written (no guessing a correction) so a real unit does not silently
+    vanish from the board; short fragments (MG3, CECZ, PMC72134) still drop.
+    """
+    if not 9 <= len(code) <= 11 or _is_container_code(code):
+        return False
+    return code[:2].isalpha() and sum(ch.isdigit() for ch in code) >= 4
+
+
 def _parse_uld_numbers(raw) -> list[str]:
     """Parse V column: multiple ULD numbers separated by commas.
 
     Example: "PMD34212MB-69,(05.12)PMD34353MB-61 (05.12)" → ["PMD34212MB", "PMD34353MB"]
-    ULD codes are usually 10 characters, but some ECOMM rows contain 11-character
-    owner suffixes such as PMC20257YAA. Keep that full code while still ignoring
-    dash/space suffixes like "-69".
-    Entries whose first 3 characters are purely numeric are filtered out.
+    Dash/slash suffixes ("-69") are ignored. A space-separated code
+    ("PMC 34464 R9") is joined when its first token alone is not a ULD.
+    Container numbers, AWB scans and short fragments are filtered out.
     """
     if _empty(raw):
         return []
@@ -655,16 +676,17 @@ def _parse_uld_numbers(raw) -> list[str]:
     for part in parts:
         part = re.sub(r"\(\d{1,2}\.\d{1,2}\)", "", part).strip()
         # Uppercase + strip non-alphanumeric so JS/server/stack-JSON all agree on the key.
-        # ULD numbers from Excel can be mixed-case "pmc12345lh" or contain dashes/spaces; the
-        # stack manager uppercases on write but the row data preserved raw form previously,
-        # which broke prepared/lookup matching for ULDs in stacks.
-        code_part = re.split(r"[-\s;/]+", part, maxsplit=1)[0]
-        cleaned = _normalize_uld_code(code_part)
-        if len(cleaned) >= 11:
-            uld = cleaned[:11]
-        else:
-            uld = cleaned[:10]
-        if len(uld) >= 3 and uld not in seen and _has_valid_uld_prefix(uld):
+        head = re.split(r"[-;/]+", part, maxsplit=1)[0].strip()
+        first = _normalize_uld_code(re.split(r"\s+", head, maxsplit=1)[0])
+        joined = _normalize_uld_code(head)
+        uld = ""
+        for cand in (first, joined):
+            if _ULD_CODE_RE.fullmatch(cand):
+                uld = cand
+                break
+        if not uld:
+            uld = next((c for c in (first, joined) if _is_near_uld_code(c)), "")
+        if uld and uld not in seen:
             result.append(uld)
             seen.add(uld)
     return result

@@ -80,7 +80,9 @@
   var sectionVisible = false;
   var trendHostIds = ["kpi-trend-breakdown", "kpi-trend-view", "kpi-trend-range", "kpi-trend-filter", "kpi-trend-chart", "kpi-trend-table"];
   function activeTrend() { return !window.__kpiActiveSubview || window.__kpiActiveSubview() === "report"; }
-  window.__unmountKpiTrend = function () {
+  // resetLatches: true only when the KPI page is left. Hidden window / subview switch
+  // keep revealedToken, so the remount solidifies the lines instead of redrawing.
+  window.__unmountKpiTrend = function (resetLatches) {
     if (sectionObserver) sectionObserver.disconnect();
     sectionObserver = null;
     sectionVisible = false;
@@ -91,11 +93,13 @@
     if (section) {
       clearTimeout(section.__kpiTrendOpeningTimer);
       section.classList.remove("is-opening", "kpi-reveal-pending");
+      if (resetLatches) section.classList.remove("is-revealed");
     }
     var chart = document.getElementById("kpi-trend-chart");
     if (chart) chart.__kpiTrendDrawGen = (chart.__kpiTrendDrawGen || 0) + 1;
     lastSig = lastDataContentSig = "";
-    pendingRevealToken = revealedToken = null;
+    pendingRevealToken = null;
+    if (resetLatches) revealedToken = null;
     if (window.__clearKpiHosts) window.__clearKpiHosts(trendHostIds);
   };
   var MORPH_MS = 560;
@@ -129,6 +133,13 @@
       return Math.round((v + m) * 255).toString(16).padStart(2, "0");
     }
     return "#" + toHex(r) + toHex(g) + toHex(b);
+  }
+  // '#rrggbb' -> 'r,g,b' (chip CSS uses rgba(var(--chip-rgb), a), no color-mix).
+  function hexRgb(hex) {
+    var h = String(hex || "").replace("#", "");
+    if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+    if (!/^[0-9a-f]{6}/i.test(h)) return "148,163,184";
+    return parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16) + "," + parseInt(h.slice(4, 6), 16);
   }
   function seriesColor(index) {
     var hue = SERIES_HUES[index % SERIES_HUES.length] + Math.floor(index / SERIES_HUES.length) * 11;
@@ -485,11 +496,13 @@
       '<div class="kpi-trend-range-row">' +
         '<div class="kpi-trend-rchips">' + chips + '</div>' +
         '<div class="kpi-trend-dates">' +
-          '<input class="kpi-trend-date" type="date" data-trend-action="range-from" ' +
+          '<span class="kpi-date-box"><input class="kpi-trend-date' + (state.range.from ? '' : ' is-empty') + '" type="date" data-trend-action="range-from" aria-label="From" ' +
             'min="' + b.min + '" max="' + b.max + '" value="' + (state.range.from || "") + '">' +
+            '<span class="kpi-date-ph" aria-hidden="true">From</span></span>' +
           '<span class="kpi-trend-date-sep">–</span>' +
-          '<input class="kpi-trend-date" type="date" data-trend-action="range-to" ' +
+          '<span class="kpi-date-box"><input class="kpi-trend-date' + (state.range.to ? '' : ' is-empty') + '" type="date" data-trend-action="range-to" aria-label="To" ' +
             'min="' + b.min + '" max="' + b.max + '" value="' + (state.range.to || "") + '">' +
+            '<span class="kpi-date-ph" aria-hidden="true">To</span></span>' +
         '</div>' +
       '</div>';
   }
@@ -529,15 +542,15 @@
           var on = selected.indexOf(name) >= 0;
           return '<button class="kpi-trend-chip' + (on ? " is-on" : "") +
             '" data-trend-action="toggle" data-value="' + esc(name) + '" style="--chip:' +
-            (colors[name] || "#94a3b8") + '"><span class="kpi-trend-chip-dot"></span>' +
+            (colors[name] || "#94a3b8") + ';--chip-rgb:' + hexRgb(colors[name] || "#94a3b8") + '"><span class="kpi-trend-chip-dot"></span>' +
             '<span class="kpi-trend-chip-l">' + esc(dispName(name)) + '</span></button>';
         }).join("")
       : '<div class="kpi-trend-empty-chip">No matches</div>';
     host.innerHTML = head + searchHtml +
       '<div class="kpi-trend-chipslider">' +
-        '<button type="button" class="kpi-trend-slide-btn is-prev" data-trend-action="chip-scroll" data-dir="-1" tabindex="-1" aria-label="Scroll series left">‹</button>' +
+        '<button type="button" class="kpi-trend-slide-btn is-prev" data-trend-action="chip-scroll" data-dir="-1" tabindex="-1" aria-label="Scroll series left"><span class="fi fi-chev-left" aria-hidden="true"></span></button>' +
         '<div class="kpi-trend-chiprow">' + chips + '</div>' +
-        '<button type="button" class="kpi-trend-slide-btn is-next" data-trend-action="chip-scroll" data-dir="1" tabindex="-1" aria-label="Scroll series right">›</button>' +
+        '<button type="button" class="kpi-trend-slide-btn is-next" data-trend-action="chip-scroll" data-dir="1" tabindex="-1" aria-label="Scroll series right"><span class="fi fi-chev-right" aria-hidden="true"></span></button>' +
       '</div>';
   }
 
@@ -1260,7 +1273,9 @@
     if (sectionObserver || typeof IntersectionObserver === "undefined") return;
     var section = document.getElementById("kpi-trend-section");
     if (!section) return;
-    section.classList.add("kpi-reveal-pending");
+    // Already opened this KPI entry (remount after hide/subview switch): stay visible,
+    // the observer would never clear the pending state because is-revealed is set.
+    if (!section.classList.contains("is-revealed")) section.classList.add("kpi-reveal-pending");
     sectionObserver = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
         var half = trendHalfVisible(e);
@@ -1699,9 +1714,21 @@
     var item = ev.target.closest && ev.target.closest(".kpi-trend-leg-item[data-si]");
     if (item) setHighlight(null);
   });
+  // The chart scales through its viewBox; a rebuild is only needed when the
+  // chart host width really changed. Debounced so a window drag is one render.
+  var resizeTimer = 0, resizeLastW = -1;
   window.addEventListener("resize", function () {
-    if (document.body.classList.contains("view-kpi-mode") && data) renderAll(false, null, "data");
-  });
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      resizeTimer = 0;
+      if (!document.body.classList.contains("view-kpi-mode") || !data) return;
+      var host = document.getElementById("kpi-trend-chart");
+      var w = host ? host.clientWidth : 0;
+      if (!w || Math.abs(w - resizeLastW) < 2) return;
+      resizeLastW = w;
+      renderAll(false, null, "data");
+    }, 180);
+  }, { passive: true });
 
   window.__renderKpiTrend = function (trend, updated) {
     if (!activeTrend()) return;

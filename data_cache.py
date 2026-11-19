@@ -43,6 +43,9 @@ _SUPPORTED_CACHE_VERSIONS = {1, 2}
 _READ_TIMEOUT_S = 150.0
 # While stalled, retry more often than the normal 10-minute interval.
 _STALE_RETRY_S = 60.0
+# After a failed fast ULD read, non-forced retries wait at least this long
+# (UI polls must not start a new Excel reader thread every 5 s).
+_ULD_RETRY_BACKOFF_S = 60.0
 
 _lock = threading.Lock()
 _state = {
@@ -75,6 +78,10 @@ _state = {
     "uld_initial_load_complete": False,
     "uld_refreshing": False,
     "uld_source_signature": None,
+    # Last failed fast ULD read (message + time). Cleared by the next successful
+    # ULD read (fast or full). Drives the ULD error panel and the retry backoff.
+    "uld_read_error": None,
+    "uld_read_error_at": None,
     "defer_fast_uld": False,
 }
 
@@ -98,7 +105,9 @@ def mark_refresh_started():
             _state["load_stage"] = "Frissítés indítása"
             _state["load_detail"] = "Adatforrások előkészítése"
             _state["load_started_at"] = datetime.now()
-            _state["data_version"] += 1
+            # No data_version bump: "refreshing" is progress metadata. The
+            # loading overlay reads it on its own poll; no version-gated view
+            # renders it, so a bump only forced a full identical rerender.
 
 
 def bump_data_version():
@@ -481,7 +490,13 @@ def refresh_uld_data(force: bool = False) -> bool:
         has_data = bool(_state.get("uld_data"))
         same_source = _state.get("uld_source_signature") == source_sig
         already_refreshing = _state.get("uld_refreshing")
+        last_error_at = _state.get("uld_read_error_at")
     if already_refreshing:
+        return False
+    if (not force and last_error_at is not None
+            and (datetime.now() - last_error_at).total_seconds() < _ULD_RETRY_BACKOFF_S):
+        # A failed read (OneDrive placeholder / lock / missing file) is retried
+        # with backoff, not on every UI poll.
         return False
     if has_data and same_source and not force:
         return False
@@ -491,13 +506,25 @@ def refresh_uld_data(force: bool = False) -> bool:
     try:
         with _lock:
             _state["uld_refreshing"] = True
-            _state["data_version"] += 1
+            # No bump: the start flag is progress metadata (see mark_refresh_started).
         with _lock:
             initial_uld_load = _state.get("status") == "loading" and not _state.get("refresh_count")
         progress_callback = _set_load_progress if initial_uld_load else None
-        uld_data, meta = load_uld_data_fast(progress_callback=progress_callback)
+        try:
+            uld_data, meta = load_uld_data_fast(progress_callback=progress_callback)
+        except Exception as exc:  # reader bug or IO error: keep last good data
+            log.exception("Fast ULD refresh raised")
+            uld_data, meta = [], {"error": f"{type(exc).__name__}: {exc}"}
         if meta.get("error"):
             log.warning("Fast ULD refresh failed: %s", meta.get("error"))
+            with _lock:
+                # Keep-last-good: uld_data is untouched. Record why and when,
+                # clear the refreshing flag in the SAME step as the version bump
+                # so the next poll renders the error state, not the skeleton.
+                _state["uld_read_error"] = str(meta.get("error"))
+                _state["uld_read_error_at"] = datetime.now()
+                _state["uld_refreshing"] = False
+                _state["data_version"] += 1
             return False
         captured_signature = meta.pop("_source_signature", None)
         if captured_signature is not None:
@@ -515,6 +542,8 @@ def refresh_uld_data(force: bool = False) -> bool:
             _state["uld_last_refresh"] = datetime.now()
             _state["uld_initial_load_complete"] = True
             _state["uld_source_signature"] = source_sig
+            _state["uld_read_error"] = None
+            _state["uld_read_error_at"] = None
             if meta.get("ecomm_source_age_minutes") is not None:
                 _state.setdefault("kpi", {})["ecomm_source_age_minutes"] = meta.get("ecomm_source_age_minutes")
                 _state["kpi"]["ecomm_source_mtime"] = meta.get("ecomm_source_mtime")
@@ -703,6 +732,7 @@ def _mark_read_stalled(reason: str, first: bool):
     now = datetime.now()
     with _lock:
         have_good = _has_good_data_locked()
+        before = (bool(_state.get("read_stalled")), _state.get("status"), _state.get("errors"))
         if _state.get("read_stall_since") is None:
             _state["read_stall_since"] = now
         _state["read_stalled"] = True
@@ -719,7 +749,11 @@ def _mark_read_stalled(reason: str, first: bool):
             else:
                 _state["status"] = "error"
                 _state["errors"] = {"error": f"Az adatforrás jelenleg nem olvasható ({reason})."}
-        _state["data_version"] += 1
+        # Bump only when something a version-gated view renders changed (stall
+        # onset, status, error text). A repeated stall retry (every 60 s) only
+        # refreshes metadata; the stall badge/TV banner read it on their own tick.
+        if before != (True, _state.get("status"), _state.get("errors")):
+            _state["data_version"] += 1
     log.warning("Cache: read stalled — keeping last good data (%s)", reason)
 
 
@@ -812,6 +846,9 @@ def _apply_read_result(result, first: bool, read_started_at: datetime | None = N
         if not fast_uld_is_newer:
             _state["uld_last_refresh"] = loaded_at
             _state["uld_source_signature"] = effective_uld_signature
+            # The full read is a valid ULD snapshot: it resolves a failed fast read.
+            _state["uld_read_error"] = None
+            _state["uld_read_error_at"] = None
             if uld_meta is not None:
                 for key in ("uld_times_full", "uld_returned", "uld_archive"):
                     if key in uld_meta:
@@ -855,7 +892,7 @@ def _worker():
         else:
             with _lock:
                 _state["refreshing"] = True
-                _state["data_version"] += 1
+                # No bump: refresh start is metadata; the result bumps on apply.
         log.info("Cache: starting data refresh")
         # A failed/timed-out process is joined before the next attempt.
         try:
@@ -937,7 +974,6 @@ def start():
         print("  [i] Dashboard gyorsítótár betöltve, háttérfrissítés indul...", flush=True)
         with _lock:
             _state["refreshing"] = True
-            _state["data_version"] += 1
     worker_delay = 4.0 if cache_loaded else 0.0
     defer_fast_uld = not cache_loaded and oracle_ecomm.get_source_mode() != "oracle"
     with _lock:

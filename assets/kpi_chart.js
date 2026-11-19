@@ -477,11 +477,13 @@
 
     function copyFeedback(btn) {
         if (!btn) return;
-        var old = btn.textContent;
-        btn.textContent = '✓';
+        if (btn.classList.contains('is-copied')) return;
+        // Swap the icon class only: the button's child is React-managed (Dash).
+        var ico = btn.querySelector('.fi');
+        if (ico) { ico.classList.remove('fi-copy'); ico.classList.add('fi-tick'); }
         btn.classList.add('is-copied');
         setTimeout(function () {
-            btn.textContent = old || '⧉';
+            if (ico) { ico.classList.remove('fi-tick'); ico.classList.add('fi-copy'); }
             btn.classList.remove('is-copied');
         }, 1200);
     }

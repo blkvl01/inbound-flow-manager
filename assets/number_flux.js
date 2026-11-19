@@ -14,16 +14,39 @@
     return document.hidden || (document.body &&
       (document.body.classList.contains("view-kpi-mode") || document.body.classList.contains("view-tv-mode")));
   }
+  // Write the existing text node in place (characterData), so per-frame
+  // count-up text never produces childList mutations for the card observers.
+  function setText(el, value) {
+    var node = el.firstChild;
+    if (node && node.nodeType === 3 && !node.nextSibling) {
+      if (node.nodeValue !== value) node.nodeValue = value;
+    } else if (el.textContent !== value) {
+      el.textContent = value;
+    }
+  }
   function finish(el) {
     if (el.__cuRaf) cancelAnimationFrame(el.__cuRaf);
     el.__cuRaf = 0;
-    if (el.isConnected && typeof el.__cuValue === "number") el.textContent = String(el.__cuValue);
+    if (el.isConnected && typeof el.__cuValue === "number") setText(el, String(el.__cuValue));
     active.delete(el);
   }
   function tween(el) {
     if (!el.isConnected) return;
     var target = parseInt(el.getAttribute("data-countup"), 10);
-    if (isNaN(target) || el.__cuValue === target) return;
+    if (isNaN(target)) return;
+    // Remember which card owns this node. Cards are keyed by AWB, so the node
+    // should never change owner; if it does, snap instead of counting from
+    // another card's number.
+    var owner = el.closest && el.closest("[data-card-key]");
+    var key = owner ? owner.getAttribute("data-card-key") : "";
+    if (el.__cuKey !== undefined && el.__cuKey !== key) {
+      el.__cuKey = key;
+      el.__cuValue = target;
+      finish(el);
+      return;
+    }
+    el.__cuKey = key;
+    if (el.__cuValue === target) return;
     var from = el.__cuRaf ? parseInt(el.textContent, 10) : el.__cuValue;
     from = typeof from === "number" && isFinite(from) ? from : 0;
     if (el.__cuRaf) cancelAnimationFrame(el.__cuRaf);
@@ -36,7 +59,7 @@
       if (!start) start = now;
       var progress = Math.min(1, (now - start) / DURATION);
       var value = String(Math.round(from + (target - from) * (1 - Math.pow(1 - progress, 3))));
-      if (el.textContent !== value) el.textContent = value;
+      setText(el, value);
       if (progress < 1) el.__cuRaf = requestAnimationFrame(step);
       else finish(el);
     }

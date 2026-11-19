@@ -83,7 +83,7 @@
           '<span class="bec-prefix-bar"><i style="width:' + w.toFixed(1) + '%"></i></span>' +
           '<span class="bec-prefix-count">' + (r.count || 0) + ' db</span>' +
           '<span class="bec-prefix-kg">' + fmtKg(r.kg) + '</span>' +
-          '<span class="bec-prefix-chev" aria-hidden="true">▸</span>' +
+          '<span class="bec-prefix-chev" aria-hidden="true"><span class="fi fi-chev-right" aria-hidden="true"></span></span>' +
         '</button>' +
         '<div class="bec-prefix-detail">' +
           '<span class="bec-prefix-split">' +
@@ -102,7 +102,7 @@
         '<span class="bec-prefix-dot" aria-hidden="true"></span>' +
         '<span class="bec-prefix-title">' + esc(meta.label) + ' — prefix bontás</span>' +
         '<span class="bec-prefix-sub">' + data.length + ' prefix · ' + fmtKg(total) + '</span>' +
-        '<button type="button" class="bec-prefix-close" aria-label="Bezárás">✕</button>' +
+        '<button type="button" class="bec-prefix-close" aria-label="Bezárás"><span class="fi fi-x" aria-hidden="true"></span></button>' +
       '</div>' +
       '<div class="bec-prefix-body">' + rows + '</div>';
 

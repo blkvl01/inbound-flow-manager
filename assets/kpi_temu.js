@@ -54,8 +54,8 @@
     customs: "Customs Clearance", outbound: "Outbound"
   };
   var STAGE_ROUTES = {
-    ata_noa: "ATA → NOA", noa_transfer: "NOA → Transfer", transfer_customs: "Transfer → Customs",
-    customs: "Customs start → end", outbound: "Customs → Departure"
+    ata_noa: "ATA – NOA", noa_transfer: "NOA – Transfer", transfer_customs: "Transfer – Customs",
+    customs: "Customs start – end", outbound: "Customs – Departure"
   };
   var COUNTRY_NAMES = {
     DE: "Germany", FR: "France", NL: "Netherlands", BE: "Belgium", PL: "Poland",
@@ -75,6 +75,8 @@
     return p.h > 0 ? '<span class="kpi-temu-dur-hour">' + p.h + 'h</span><span class="kpi-temu-dur-min">' + p.m + 'm</span>'
                    : '<span class="kpi-temu-dur-hour">' + p.m + 'm</span>';
   }
+  // Dense chart columns (>22) only fit the hour part; the full value stays in the column title.
+  function fmtDurCompact(hours) { var p = durParts(hours); return p.h > 0 ? (Math.round(asNum(hours)) + "h") : (p.m + "m"); }
   function fmtDurSigned(hours) { return (hours < 0 ? "−" : "+") + fmtDur(Math.abs(hours)); }
   function fmtAxis(hours) { return Math.round(asNum(hours)) + "h"; }
   function fmtDate(iso) { var p = String(iso || "").split("-"); return p.length === 3 ? (p[0] + "." + p[1] + "." + p[2]) : String(iso || ""); }
@@ -311,7 +313,7 @@
     var a = fl[0], b = fl[fl.length - 1];
     if (fl.length === 1) return mode === "day" ? fmtDate(a.d0) : (a.key + " · " + fmtDate(a.d0) + " – " + fmtDate(a.d1));
     if (rangeIsFull() && selectedKey == null) return "Full range · " + fl.length + (mode === "day" ? " days" : " weeks");
-    return (mode === "day" ? fmtDate(a.d0) : a.key) + "  →  " + (mode === "day" ? fmtDate(b.d1 || b.d0) : b.key) + "  (" + fl.length + ")";
+    return (mode === "day" ? fmtDate(a.d0) : a.key) + " – " + (mode === "day" ? fmtDate(b.d1 || b.d0) : b.key) + "  (" + fl.length + ")";
   }
 
   // ── controls ────────────────────────────────────────────────────────────
@@ -320,7 +322,7 @@
     var html = defs.map(function (d) {
       var active = current === d[0];
       return '<button type="button" class="kpi-temu-tg-btn' + (active ? " is-active" : "") + '" ' + attr + '="' + esc(d[0]) +
-        '" role="tab" aria-selected="' + active + '">' + esc(d[1]) + '</button>';
+        '" aria-pressed="' + active + '">' + esc(d[1]) + '</button>';
     }).join("");
     if (host.innerHTML !== html) host.innerHTML = html;
   }
@@ -333,7 +335,7 @@
     var ch = document.getElementById("kpi-temu-compare");
     if (ch) {
       var chtml = '<button type="button" class="kpi-temu-tg-btn kpi-temu-cmp-btn' + (compare ? " is-active" : "") +
-        '" data-temu-action="toggle-compare" aria-pressed="' + compare + '"><span class="kpi-temu-cmp-ico">⇄</span> Compare</button>';
+        '" data-temu-action="toggle-compare" aria-pressed="' + compare + '"><span class="kpi-temu-cmp-ico"><span class="fi fi-swap" aria-hidden="true"></span></span> Compare</button>';
       if (ch.innerHTML !== chtml) ch.innerHTML = chtml;
     }
     renderToggle(document.getElementById("kpi-temu-view"), "data-temu-view", mode, [["day", "Day"], ["week", "Week"]]);
@@ -355,10 +357,17 @@
     var fl = focusedList(), full = rangeIsFull();
     var fromVal = (!full && fl.length) ? (fl[0].d0 || fl[0].period_key) : "";
     var toVal = (!full && fl.length) ? (fl[fl.length - 1].d1 || fl[fl.length - 1].period_key) : "";
+    // Empty input: hide the locale mask ("éééé.hh.nn.") behind a short label (kpi-date-ph).
+    function dateBox(which, label, val) {
+      return '<span class="kpi-date-box">' +
+        '<input type="date" class="kpi-temu-date' + (val ? '' : ' is-empty') + '" data-temu-date="' + which + '" aria-label="' + label +
+        '" value="' + esc(val) + '" min="' + esc(span.min) + '" max="' + esc(span.max) + '">' +
+        '<span class="kpi-date-ph" aria-hidden="true">' + label + '</span></span>';
+    }
     return '<span class="kpi-temu-dates-cap">Range</span>' +
-      '<input type="date" class="kpi-temu-date" data-temu-date="from" aria-label="From" value="' + esc(fromVal) + '" min="' + esc(span.min) + '" max="' + esc(span.max) + '">' +
+      dateBox("from", "From", fromVal) +
       '<span class="kpi-temu-date-sep">–</span>' +
-      '<input type="date" class="kpi-temu-date" data-temu-date="to" aria-label="To" value="' + esc(toVal) + '" min="' + esc(span.min) + '" max="' + esc(span.max) + '">';
+      dateBox("to", "To", toVal);
   }
   function renderDates() {
     var host = document.getElementById("kpi-temu-dates");
@@ -446,7 +455,7 @@
     var diff = cur - prevV;
     var dir = diff < -0.0001 ? "down" : (diff > 0.0001 ? "up" : "flat");
     var good = dir === "down" ? "is-good" : (dir === "up" ? "is-bad" : "is-flat");
-    var arrow = dir === "down" ? "▼" : (dir === "up" ? "▲" : "■");
+    var arrow = '<span class="fi fi-' + (dir === "down" ? "arrow-down" : (dir === "up" ? "arrow-up" : "minus")) + '" aria-hidden="true"></span>';
     var pct = prevV ? (diff / prevV * 100) : 0;
     var n = closedPeriods(cardList()).length || cardList().length;
     var base = "vs previous " + n + " " + (mode === "day" ? (n > 1 ? "days" : "day") : (n > 1 ? "weeks" : "week"));
@@ -602,7 +611,7 @@
         '" data-temu-key="' + esc(p.period_key) + '" style="--col-i:' + i + '" title="' + esc(p.key + " · " + p.count + " shipments · " + fmtDur(total)) + '">' +
         (isA && p.period_key === aStart ? '<span class="kpi-temu-cmp-tag a">A</span>' : '') + (isB && p.period_key === bStart ? '<span class="kpi-temu-cmp-tag b">B</span>' : '') +
         (today ? '<span class="kpi-temu-today-tag">Today</span>' : '') +
-        '<span class="kpi-temu-col-total" data-cu="' + total.toFixed(4) + '">' + esc(fmtDur(total)) + '</span>' +
+        '<span class="kpi-temu-col-total' + (dense ? ' is-compact' : '') + '" data-cu="' + total.toFixed(4) + '">' + esc(dense ? fmtDurCompact(total) : fmtDur(total)) + '</span>' +
         '<span class="kpi-temu-bar-track"><span class="kpi-temu-bar" style="height:' + barPct.toFixed(3) + '%">' + segHtml + '</span></span>' +
         '<span class="kpi-temu-col-label">' + esc(p.key) + '<i class="kpi-temu-col-count">' + esc(p.count) + ' pcs</i></span>' +
         '</div>';
@@ -610,7 +619,7 @@
     return '<div class="kpi-temu-chart-inner">' +
       '<div class="kpi-temu-yaxis" aria-hidden="true">' + yaxis + '</div>' +
       '<div class="kpi-temu-plot"><div class="kpi-temu-gridlines" aria-hidden="true">' + gridlines + '</div>' +
-        '<div class="kpi-temu-cols">' + cols + '</div>' +
+        '<div class="kpi-temu-cols' + (dense ? ' is-dense' : '') + '">' + cols + '</div>' +
         '<div class="kpi-temu-tooltip" id="kpi-temu-tooltip" aria-hidden="true"></div></div></div>';
   }
   function renderChartOnly(animate) {
@@ -679,7 +688,7 @@
       '<span class="kpi-temu-cmp-slot-range">' + esc(cmpRangeLabel(rng)) + '</span>' +
       '<b class="kpi-temu-cmp-slot-val kpi-temu-dur-split">' + fmtDurHtml(agg.total) + '</b>' +
       '<span class="kpi-temu-cmp-slot-sub">' + esc(agg.count + ' pcs · ' + cmpSpanText(rng)) + '</span>' +
-      '<span class="kpi-temu-cmp-slot-x" data-temu-action="cmp-clear-' + tag + '" role="button" aria-label="Clear ' + tag.toUpperCase() + '">✕</span></button>';
+      '<span class="kpi-temu-cmp-slot-x" data-temu-action="cmp-clear-' + tag + '" role="button" aria-label="Clear ' + tag.toUpperCase() + '"><span class="fi fi-x" aria-hidden="true"></span></span></button>';
   }
   function renderPanel() {
     var host = document.getElementById("kpi-temu-detail");
@@ -691,7 +700,7 @@
     var overallWinner = both ? (aggA.total < aggB.total - 0.0001 ? "a" : (aggB.total < aggA.total - 0.0001 ? "b" : "flat")) : "";
 
     var slots = '<div class="kpi-temu-cmp-slots">' + cmpSlotHtml("a", cmpA) +
-      '<button type="button" class="kpi-temu-cmp-swap" data-temu-action="cmp-swap" aria-label="Swap A and B" title="Swap A ⇄ B">⇄</button>' +
+      '<button type="button" class="kpi-temu-cmp-swap" data-temu-action="cmp-swap" aria-label="Swap A and B" title="Swap A and B"><span class="fi fi-swap" aria-hidden="true"></span></button>' +
       cmpSlotHtml("b", cmpB) + '</div>';
 
     // Verdict (the "deeper analysis"): total Δ + biggest-moving stage.
@@ -738,7 +747,7 @@
 
     host.innerHTML =
       '<div class="kpi-temu-cmp-head"><b>Deep dive</b><span class="kpi-temu-cmp-head-sub">A vs B</span>' +
-        '<button type="button" class="kpi-temu-detail-close" data-temu-action="clear-compare" aria-label="Clear comparison">✕</button></div>' +
+        '<button type="button" class="kpi-temu-detail-close" data-temu-action="clear-compare" aria-label="Clear comparison"><span class="fi fi-x" aria-hidden="true"></span></button></div>' +
       slots + verdict +
       '<div class="kpi-temu-cmp-stages"><div class="kpi-temu-cmp-st is-head"><span class="kpi-temu-cmp-st-name">Stage</span><span class="kpi-temu-cmp-st-bars"></span><span class="kpi-temu-cmp-st-va">A</span><span class="kpi-temu-cmp-st-vb">B</span><span class="kpi-temu-cmp-st-d">Δ</span></div>' + stageRows + '</div>';
     var stageBlock = host.querySelector(".kpi-temu-cmp-stages");
@@ -881,7 +890,7 @@
     host.innerHTML =
       '<div class="kpi-temu-flag-drawer' + (suspectsOpen ? " is-open" : "") + '">' +
         '<button type="button" class="kpi-temu-flag-bar" data-temu-action="toggle-suspects" aria-expanded="' + suspectsOpen + '">' +
-          '<span class="kpi-temu-flag-warn" aria-hidden="true">⚠</span>' +
+          '<span class="kpi-temu-flag-warn" aria-hidden="true"><span class="fi fi-warn" aria-hidden="true"></span></span>' +
           '<span class="kpi-temu-flag-title">Flagged records</span>' +
           '<span class="kpi-temu-flag-count">' + asNum(s.total) + '</span>' +
           '<span class="kpi-temu-flag-sub">full milestone chain · the flagged step is excluded from the averages · fix at source</span>' +
@@ -909,6 +918,7 @@
   function setDur(el, hours) {
     if (!el) return;
     if (el.classList && el.classList.contains("kpi-temu-dur-split")) el.innerHTML = fmtDurHtml(hours);
+    else if (el.classList && el.classList.contains("is-compact")) el.textContent = fmtDurCompact(hours);
     else el.textContent = fmtDur(hours);
   }
   function countUp(el, target, animate, delay) {
@@ -1120,9 +1130,10 @@
     dragging = true; dragStart = i; dragEnd = i; dragMoved = false;
   });
   document.addEventListener("pointermove", function (e) {
-    if (dragging) { var i = colIndexFromEvent(e); if (i >= 0) { if (i !== dragStart) dragMoved = true; dragEnd = i; paintDrag(); } }
-    if (e.target.closest && e.target.closest("#kpi-temu-section .kpi-temu-cols")) { var j = colIndexFromEvent(e); if (j >= 0) showTooltip(j); }
-  });
+    if (!dragging && !(document.body && document.body.classList.contains("view-kpi-mode"))) return;
+    if (dragging) { var i = colIndexFromEvent(e); if (i >= 0 && i !== dragEnd) { if (i !== dragStart) dragMoved = true; dragEnd = i; paintDrag(); } }
+    if (e.target.closest && e.target.closest("#kpi-temu-section .kpi-temu-cols")) { var j = colIndexFromEvent(e); if (j >= 0) queueTooltip(j); }
+  }, { passive: true });
   document.addEventListener("pointerup", function (e) {
     if (!dragging) return;
     dragging = false;
@@ -1142,38 +1153,65 @@
     dragStart = dragEnd = -1; dragMoved = false;
     document.querySelectorAll("#kpi-temu-section .kpi-temu-col.in-brush").forEach(function (c) { c.classList.remove("in-brush"); });
   });
+  // A cancelled gesture (touch scroll, focus loss) never delivers pointerup, so the
+  // brush would stay "dragging" and the next hover would paint a range. Drop it.
+  function cancelDrag() {
+    if (!dragging) return;
+    dragging = false; dragStart = dragEnd = -1; dragMoved = false;
+    document.querySelectorAll("#kpi-temu-section .kpi-temu-col.in-brush").forEach(function (c) { c.classList.remove("in-brush"); });
+  }
+  document.addEventListener("pointercancel", cancelDrag);
+  window.addEventListener("blur", cancelDrag);
+  // Hover: coalesced to one rebuild per frame, and only when the column (or its
+  // data / the tooltip node) actually changed.
+  var tipLastIdx = -1, tipLastP = null, tipLastEl = null, tipPendingIdx = -1, tipFrame = 0;
   function showTooltip(idx) {
     var tip = document.getElementById("kpi-temu-tooltip");
     if (!tip) return;
     var list = focusedList(), p = list[idx];
-    if (!p) { tip.classList.remove("is-on"); return; }
+    if (!p) { tip.classList.remove("is-on"); tipLastIdx = -1; return; }
+    if (idx === tipLastIdx && p === tipLastP && tip === tipLastEl && tip.classList.contains("is-on")) return;
+    tipLastIdx = idx; tipLastP = p; tipLastEl = tip;
+    // Read geometry before writing the content.
+    var plot = tip.parentNode.getBoundingClientRect();
+    var colEl = document.querySelector('#kpi-temu-section .kpi-temu-col[data-temu-i="' + idx + '"]');
+    var r = colEl ? colEl.getBoundingClientRect() : null;
     var lines = stages().map(function (s) {
       return '<div class="kpi-temu-tt-row" style="--seg-rgb:' + stageColor(s.key) + '"><i></i><span>' + esc(stageDisplayLabel(s)) + '</span><b>' + esc(fmtDur(asNum((p.segments || {})[s.key]))) + '</b></div>';
     }).join("");
     tip.innerHTML = '<div class="kpi-temu-tt-head">' + esc(p.key) + ' · ' + esc(p.count) + ' pcs</div>' + lines + '<div class="kpi-temu-tt-total"><span>Total</span><b>' + esc(fmtDur(p.total)) + '</b></div>';
     tip.classList.add("is-on");
     // Keep the popup fully inside the plot: clamp its centre by its own half-width.
-    var plot = tip.parentNode.getBoundingClientRect();
-    var colEl = document.querySelector('#kpi-temu-section .kpi-temu-col[data-temu-i="' + idx + '"]');
-    if (colEl) {
-      var r = colEl.getBoundingClientRect();
+    if (r) {
       var w = tip.offsetWidth || 196;
       var c = r.left - plot.left + r.width / 2;
       c = Math.max(w / 2 + 8, Math.min(plot.width - w / 2 - 8, c));
       tip.style.left = c + "px";
     }
   }
+  function queueTooltip(idx) {
+    tipPendingIdx = idx;
+    if (tipFrame) return;
+    tipFrame = requestAnimationFrame(function () {
+      tipFrame = 0;
+      if (tipPendingIdx >= 0) showTooltip(tipPendingIdx);
+    });
+  }
+  function hideTooltip() {
+    tipPendingIdx = -1; tipLastIdx = -1;
+    var tip = document.getElementById("kpi-temu-tooltip"); if (tip) tip.classList.remove("is-on");
+  }
   document.addEventListener("pointerover", function (e) {
     var cols = e.target.closest && e.target.closest("#kpi-temu-section .kpi-temu-cols");
     if (!cols) return;
-    var i = colIndexFromEvent(e); if (i >= 0) showTooltip(i);
-  });
+    var i = colIndexFromEvent(e); if (i >= 0) queueTooltip(i);
+  }, { passive: true });
   document.addEventListener("pointerout", function (e) {
     var cols = e.target.closest && e.target.closest("#kpi-temu-section .kpi-temu-cols");
     if (!cols) return;
     if (e.relatedTarget && cols.contains(e.relatedTarget)) return;
-    var tip = document.getElementById("kpi-temu-tooltip"); if (tip) tip.classList.remove("is-on");
-  });
+    hideTooltip();
+  }, { passive: true });
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Enter" && e.key !== " ") return;
     var col = e.target.closest && e.target.closest("#kpi-temu-section .kpi-temu-col[data-temu-key]");
@@ -1237,7 +1275,9 @@
     var sig = signature();
     if (sig === lastRenderSig && document.querySelector(".kpi-temu-col")) { armReveal(); return; }
     lastRenderSig = sig; lastCountSig = "";
-    render(revealed);
+    // Data refresh / remount: snap to the new values. The column grow only runs from
+    // revealSection (the one-time opening); render(revealed) replayed it on every poll.
+    render(false);
     if (window.__markKpiHosts) window.__markKpiHosts(temuHostIds);
   };
   // Play the staggered column opening exactly ONCE — the first time the user

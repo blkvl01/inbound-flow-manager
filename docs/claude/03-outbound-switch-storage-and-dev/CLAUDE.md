@@ -20,59 +20,34 @@ Hierarchia:
 rendszám > GLABS ID > AWB sorok
 ```
 
-Outbound kártya:
+Outbound ADAT (megmarad): a `data_cache` állapot `outbound_cards` /
+`outbound_errors` kulcsai és a KPI `outbound_*` mezői. Fogyasztók: TV mód
+(`/api/tv/ops` -> kiadott panel, rakodások, műszak riport) és a KPI oldal
+(`kpi-mode-outbound`, Flow/Napszak chartok). Aktív sor: nem `Kiadva`, nincs
+`issued_time`; a TV-ben kiadott tétel sehol nem jelenhet meg.
 
-- fő az adott rendszám/truck.
-- badge: `X lerakó`, ahol a lerakó az A oszlop különböző értékeinek száma.
-- GLABS blokkok `details/summary` dropdownnal.
-- GLABS progress: `ready / total kiadható`.
-- AWB sorok: `AWB + LMP + colli + súly + státusz`.
-- Több lerakó vizuálisan LMP színcsoportokkal elkülönül.
-
-Outbound aktív sor:
-
-- Nem `Kiadva`.
-- Nincs `issued_time`.
-- A közelmúltban kiadott vagy frissen checkinelt sorok még látszódhatnak outbound kontextusban.
-
-Outbound kártyastátusz:
-
-```text
-PIHENŐN           ha rest aktív
-LEZÁRVA           ha active == 0
-SOFŐR HELYSZÍNEN  ha van checkin és nem pihenő
-KIADÁSRA VÁR      ha van ready és nincs checkin
-VÁRAKOZIK         ha nincs checkin és nincs ready
-```
-
-Outbound szűrők:
-
-```text
-Összes
-Sofőr itt
-Kiadásra vár
-Pihenőn
-Várakozik
-Lezárt
-```
-
-Az inbound/outbound ugyanazokat a stat gomb ID-kat használja, de a címkék és színek flow váltáskor átállnak.
+Outbound NÉZET: 2026-11-19-én user döntésre törölve (nem volt elérhető gomb).
+Vele ment: `_make_outbound_card`, `_outbound_filter_tokens`, outbound ág a
+stat/legend/dashboard callbackekben, `flow-outbound-mode` body class, GLABS
+nyomtatási előnézet (`print_preview.js`, `jsbarcode.min.js`, `/print/glabs`,
+`print-preview-overlay`) és a csak ezekhez tartozó CSS. Az `outbound-awb-row`,
+`outbound-glabs-block` stb. osztályok ÉLŐK: az inbound kiadható-lista
+(`_ready_item_rows`, `inbound-ready-block`) használja őket.
 
 ---
 
-## INBOUND/OUTBOUND switch
+## INBOUND/ULD switch
 
-`flow-mode` dcc.Store alapérték: `inbound`.
+`flow-mode` dcc.Store alapérték: `inbound`; értékei `inbound` | `uld`.
 
 A switch és a stat filter store beállítása kliensoldali callbackben történik, hogy a gombállapot azonnal reagáljon, ne várjon szerver roundtripre.
 
 Flow váltáskor:
 
-- body class: `flow-outbound-mode`
+- body class: `flow-uld-mode`
 - rövid `flow-switching` animáció
 - aktív filter reset: `all`
-- legend és stat labels átállnak
-- dashboard újrarendereli a megfelelő kártyarácsot
+- dashboard / ULD nézet újrarenderel
 
 Korábbi hiba: néha beragadt a switch/filter, mert server callback késleltette a store állapotot. A flow és filter store most clientside.
 
@@ -125,8 +100,9 @@ UI animáció:
 
 - `assets/card_fx.js` kliensoldali, delegált kattintásfigyelővel indul.
 - Kattintáskor a kártyák pozícióiról snapshot készül, a kattintott kártya fixed-position ghostként fade/scale animációval fut ki.
-- A tényleges kártya azonnal kikerül a gridből; a helyét egy rövid életű, nullára záródó placeholder tartja, ezért nem marad üres card slot.
-- Dash közben azonnal frissíthet; az új DOM beérkezése után a megmaradt kártyák FLIP technikával, csak `transform` animációval csúsznak az új helyükre.
+- A valódi kártya React/Dash node: a JS SOHA nem veszi ki (`removeChild`) és nem tesz mellé placeholdert — csak `card-exiting` osztályt kap (`visibility:hidden`, helyén marad). A kártyát a szerver-render veszi ki; ha 8 mp után is a DOM-ban van (mentés nem ment át), visszakapja a láthatóságot.
+- Minden kártya stabil Dash id-t kap a `data-card-key`-ből (`_key_cards`: `{"type":"prio-card","index":<AWB | outbound:kulcs>}`). Enélkül a dash-renderer POZÍCIÓ szerint egyeztet, és betároláskor egy MÁSIK kártya tűnt el / a nyitott megjegyzés és a count-up a szomszédra csúszott.
+- Az új DOM beérkezése után a megmaradt kártyák FLIP technikával, csak `transform` animációval csúsznak az új helyükre.
 - A `Betárolt tételek` renderelés nem ír shared storage-ot, csak olvas. Storage cleanup csak háttérfrissítéskor történhet, így egy kattintás nem tüntethet el mellékhatásként másik kártyát.
 
 Manual stored extra:
@@ -220,8 +196,12 @@ Háttérfrissítés:
 
 UI poll:
 
-- `dcc.Interval(id="poll", interval=2000)`
+- `dcc.Interval(id="poll", interval=5000)`
 - Ha `data_version` nem változott, callback `no_update`.
+- `data_version` csak renderelt változásra emelkedik: adatbeolvasás vége, ULD-olvasás vége/hibája, stored flags, override, megjegyzés, stack-változás. NEM emel: frissítés-indulás (`refreshing`, `uld_refreshing`), ismételt stall-próba (csak az első stall, status- vagy hibaszöveg-váltás). A `refreshing`/stall jelzést a loading overlay és a `tick` saját pollja olvassa.
+- ULD aktív nézet: `_uld_active_signature` (rekordok, aktív stackek, stack-időadatok, override, szűrők, oldal) a `uld-dispatched-sig` store-ban `active:` előtaggal; poll + változatlan aláírás = `no_update`. Stack-only render után az aláírás `None`, így a következő verzióváltás teljes renderrel frissíti a listát.
+- TV mód (`view-mode == "tv"`): a `data-version` store befagy, a stat/KPI/telítettség/BEC poll-callbackek `no_update`-et adnak (a TV saját `/api/tv/ops` fetch-et használ). Ezek `view-mode` Inputot kaptak, kilépéskor újrarenderelnek.
+- `/api/tv/ops`: payload-cache `data_version` kulccsal + 10 s TTL, a `freshness` blokk minden kérésnél friss; a df-ből csak a használt oszlopok kerülnek ki.
 
 ---
 

@@ -6,36 +6,10 @@
 (function () {
   "use strict";
 
-  /* ──────────────────────────────────────────────────────────────
-     NAPSZAK GRADIENT
-  ────────────────────────────────────────────────────────────── */
-
-  const _DAYPART = [
-    { from:  0, to:  5, b1:"255,138,61",  b2:"167,139,250", b3:"74,158,255",  op:[0.28,0.22,0.18] },
-    { from:  5, to:  7, b1:"255,160,80",  b2:"255,200,100", b3:"167,139,250", op:[0.32,0.26,0.20] },
-    { from:  7, to: 11, b1:"255,138,61",  b2:"74,158,255",  b3:"167,139,250", op:[0.30,0.24,0.20] },
-    { from: 11, to: 15, b1:"255,200,60",  b2:"74,158,255",  b3:"100,220,180", op:[0.28,0.22,0.20] },
-    { from: 15, to: 18, b1:"255,138,61",  b2:"255,100,100", b3:"167,139,250", op:[0.32,0.22,0.20] },
-    { from: 18, to: 20, b1:"255,80,80",   b2:"200,100,255", b3:"255,138,61",  op:[0.30,0.24,0.22] },
-    { from: 20, to: 22, b1:"167,139,250", b2:"74,100,255",  b3:"255,138,61",  op:[0.28,0.22,0.18] },
-    { from: 22, to: 24, b1:"74,100,255",  b2:"167,139,250", b3:"255,138,61",  op:[0.25,0.20,0.16] },
-  ];
-
-  function _getDaypart() {
-    const h = new Date().getHours();
-    return _DAYPART.find(d => h >= d.from && h < d.to) || _DAYPART[0];
-  }
-
-  function _applyGradient() {
-    const dp = _getDaypart();
-    const r  = document.documentElement;
-    r.style.setProperty("--tv-blob1",    dp.b1);
-    r.style.setProperty("--tv-blob2",    dp.b2);
-    r.style.setProperty("--tv-blob3",    dp.b3);
-    r.style.setProperty("--tv-blob1-op", dp.op[0]);
-    r.style.setProperty("--tv-blob2-op", dp.op[1]);
-    r.style.setProperty("--tv-blob3-op", dp.op[2]);
-  }
+  // A napszakfüggő háttér (régi _DAYPART/_applyGradient) törölve: a :root-ra írt
+  // --tv-blob* értékeket a .tv-overlay saját deklarációja mindig felülírta, így
+  // soha nem érvényesült, csak 2 percenként root-stílus invalidálást okozott.
+  // A háttér a .tv-overlay statikus --tv-blob* értékeiből jön.
 
   /* ──────────────────────────────────────────────────────────────     COUNT-UP (rAF easing + flash)
   ────────────────────────────────────────────────────────────── */
@@ -229,11 +203,17 @@
     const minEl  = document.getElementById("tv-refresh-min");
     if (!arc) return;
 
-    const elapsed  = Date.now() - _lastRefreshTime;
+    // A 10 perces ív a szerver UTOLSÓ SIKERES adatbeolvasásától számol
+    // (freshness.age_seconds + a válasz óta eltelt idő), nem a 30 mp-es TV-polltól.
+    // Freshness nélkül marad a régi tartalék: az utolsó sikeres poll ideje.
+    const now = Date.now();
+    const fr = _lastFreshness;
+    const elapsed = (fr && typeof fr.age_seconds === "number")
+      ? Math.max(0, fr.age_seconds * 1000 + (_lastFreshnessAt ? now - _lastFreshnessAt : 0))
+      : now - _lastRefreshTime;
     const fraction = Math.min(elapsed / _REFRESH_MS, 1);
     const r        = 18;
     const circ     = 2 * Math.PI * r;
-    const dash     = circ * (1 - fraction);
 
     arc.style.strokeDasharray  = `${circ.toFixed(2)}`;
     arc.style.strokeDashoffset = `${(circ - circ * fraction).toFixed(2)}`;
@@ -482,13 +462,20 @@
       away: "Sofőr még nincs bejelentkezve",
     };
     // Kompakt, kétsoros chip (SOFŐR + állapotszó) — keskeny marad, így a
-    // SOFŐR+RÁMPA+MV chipek egy sorban elférnek a rövidebb kártyákon is. A pontos
-    // idő (bejelentkezés / pihenő vége) a tooltipben marad.
+    // SOFŐR+RÁMPA+MV chipek egy sorban elférnek a rövidebb kártyákon is.
+    // Pihenőnél a pihenő vége látható (TV-n nincs hover): PIHENŐ / HH:MM-ig.
+    // "11:45-ig" nem szélesebb a "Pihenőn"-nél, a "Bejelentkezve" chipnél pedig
+    // keskenyebb, így a 3-chipes nowrap sor nem törik és nem vágódik.
+    let label = "SOFŐR", value = words[state];
+    if (state === "rest") {
+      const m = String(sub || "").match(/(\d{1,2}:\d{2})(?!.*\d{1,2}:\d{2})/);
+      if (m) { label = "PIHENŐ"; value = `${m[1]}-ig`; }
+    }
     return `<div class="tv-load-card tv-load-card-driver tv-drv-${state}" title="${_esc(titles[state])}" role="img" aria-label="${_esc(titles[state])}">` +
       `<span class="tv-drv-truck">${_driverTruckSvgInner()}</span>` +
       `<div class="tv-load-card-text">` +
-        `<span>SOFŐR</span>` +
-        `<b>${words[state]}</b>` +
+        `<span>${label}</span>` +
+        `<b>${_esc(value)}</b>` +
       `</div>` +
     `</div>`;
   }
@@ -528,11 +515,11 @@
     }
 
     // Hierarchia: rendszám > GLABS id (kiemelt sor) > LMP (chipek)
-    const glabsLine = (t.glabs_ids || []).join(" · ") || "&mdash;";
+    const glabsLine = (t.glabs_ids || []).map(_esc).join(" · ") || "&mdash;";
     const lmpList = t.lmps || [];
     const lmpChips = lmpList.length
       ? `<div class="tv-truck-glabs tv-ticker-wrap"><div class="tv-ticker-inner">` +
-        lmpList.map(l => `<span class="tv-glabs-chip">${l}</span>`).join("") +
+        lmpList.map(l => `<span class="tv-glabs-chip">${_esc(l)}</span>`).join("") +
         `</div></div>`
       : "";
     const loadTags = `<div class="tv-load-tags">` +
@@ -570,7 +557,7 @@
     <div class="tv-truck-card ${tier}${t.is_closed ? " tv-truck-closed" : ""}">
       <div class="tv-truck-top">
         <div class="tv-truck-id">
-          <div class="tv-truck-plate">${t.plate}</div>
+          <div class="tv-truck-plate">${_esc(t.plate)}</div>
           <div class="tv-truck-lmp">${glabsLine}</div>
           ${lmpChips}
         </div>
@@ -624,6 +611,8 @@
 
     const eff = _getEffData();
     if (!eff.length) {
+      if (grid._tvSwapTimer) { clearTimeout(grid._tvSwapTimer); grid._tvSwapTimer = null; }
+      grid.classList.remove("tv-grid-exit");
       grid.innerHTML = '<div class="tv-no-trucks">Nincs aktív rakodás</div>';
       return;
     }
@@ -651,9 +640,13 @@
     grid.style.setProperty("grid-template-rows", `repeat(${rowCount}, minmax(0, ${rowHeight}px))`, "important");
     grid.style.setProperty("align-content", rowCount >= 3 ? "start" : "center", "important");
 
+    // Gyors egymás utáni lapváltásnál a korábbi, még függő 270 ms-os csere ne írja
+    // felül az újabb lap tartalmát.
+    if (grid._tvSwapTimer) { clearTimeout(grid._tvSwapTimer); grid._tvSwapTimer = null; }
     if (animate) {
       grid.classList.add("tv-grid-exit");
-      setTimeout(() => {
+      grid._tvSwapTimer = setTimeout(() => {
+        grid._tvSwapTimer = null;
         grid.innerHTML = html;
         grid.classList.remove("tv-grid-exit");
         void grid.offsetWidth;
@@ -662,6 +655,7 @@
         setTimeout(_initTickers, 80);
       }, 270);
     } else {
+      grid.classList.remove("tv-grid-exit");
       grid.innerHTML = html;
       setTimeout(_initTickers, 80);
     }
@@ -675,13 +669,14 @@
     _renderTruckPage(true);
   }
 
-  // Egy oldal 5–10 perc között látszik (ciklusonként újrasorsolt véletlen idő).
+  // Kamion-lapozás: auto-rotációnál minden RAKODÁSOK-belépés a következő lapot
+  // mutatja (_resetPageTimer), így 13+ rakodás 2 cikluson belül mind látszik.
+  // Ez az időzítő csak a rögzített (P) RAKODÁSOK nézetben lapoz, oldalváltási ütemben.
   function _scheduleTruckPage() {
-    const ms = (5 + Math.random() * 5) * 60 * 1000;
     _pagTimer = setTimeout(() => {
-      if (_truckPages > 1) _advanceTruckPage();
+      if (_pagePinned && _curPage === 0 && _getEffPages() > 1) _advanceTruckPage();
       _scheduleTruckPage();
-    }, ms);
+    }, _PAGE_DWELL);
   }
 
   function _updateTrucks(trucks) {
@@ -836,9 +831,12 @@
       page.classList.remove("tv-opening-pending");
       return;
     }
+    // Rendszám-gépelés csak az első megnyitáskor; az auto-rotáció / poll-refresh
+    // nem üríti ki és írja újra a rendszámot (FPS + a kulcsazonosító ne tűnjön el).
+    const typePlates = reason === "initial" || reason === "enter";
     _scheduleOpening(page, reason, 1900, () => {
       _setStagger(page, ".tv-truck-card", 0).forEach((card, i) => {
-        _typeText(card.querySelector(".tv-truck-plate"), 190 + i * 95, 14);
+        if (typePlates) _typeText(card.querySelector(".tv-truck-plate"), 190 + i * 95, 14);
       });
     });
   }
@@ -947,9 +945,9 @@
 
     _renderShiftCharts(d);
 
-    // Mark refresh time
+    // Tartalék-időbélyeg (ha a válaszban nincs freshness). Az ívet a
+    // _renderFreshness után frissítjük, hogy a friss age_seconds-ből számoljon.
     _lastRefreshTime = Date.now();
-    _updateRefreshArc();
 
     const trucksChanged = _updateTrucks(d.trucks || []);
     _renderReport(d.report);
@@ -963,6 +961,7 @@
     if (ts) ts.textContent = new Date().toLocaleTimeString("hu-HU");
 
     _renderFreshness(d.freshness);
+    _updateRefreshArc();
   }
 
   // Sync-stall / stale-data warning. The TV keeps showing the last GOOD snapshot
@@ -979,22 +978,41 @@
     return mm ? `${h} ó ${mm} p-e` : `${h} órája`;
   }
 
+  // Utolsó szerveroldali freshness + mikor kaptuk (a kliensoldali öregítéshez).
+  let _lastFreshness = null;
+  let _lastFreshnessAt = 0;
+  let _staleBannerSig = "";
+
+  // f megadva: friss szerver-válasz freshness blokkja. f nélkül (hiba / óra-tick):
+  // az utolsó ismert állapotot öregíti a kliens órával, és a kapcsolat-kiesést is jelzi.
   function _renderFreshness(f) {
     const el = document.getElementById("tv-stale-banner");
     if (!el) return;
-    f = f || {};
-    const age = (typeof f.age_seconds === "number") ? f.age_seconds : null;
+    const now = Date.now();
+    if (arguments.length && f) { _lastFreshness = f; _lastFreshnessAt = now; }
+    const fr = _lastFreshness || {};
+    let age = (typeof fr.age_seconds === "number")
+      ? fr.age_seconds + (_lastFreshnessAt ? (now - _lastFreshnessAt) / 1000 : 0)
+      : null;
+    const lastOk = _opsLastOkAt || _opsWatchFrom;
+    const disconnected = !!lastOk && (now - lastOk) > _OPS_CLIENT_STALE_MS;
+    if (age == null && disconnected && _opsLastOkAt) age = (now - _opsLastOkAt) / 1000;
     // Soft threshold: two missed intervals (~22 perc) also raises the warning.
     const tooOld = age != null && age > 22 * 60;
-    const on = !!f.stalled || tooOld;
+    const on = disconnected || !!fr.stalled || tooOld;
     if (!on) {
       if (el.getAttribute("data-on") !== "0") {
         el.setAttribute("data-on", "0");
         el.innerHTML = "";
       }
+      _staleBannerSig = "";
       return;
     }
     const ageTxt = age != null ? _fmtAge(age) : "ismeretlen ideje";
+    const lead = disconnected ? "Nincs kapcsolat" : "Szinkron elakadt";
+    const sig = lead + "|" + ageTxt;
+    if (sig === _staleBannerSig && el.getAttribute("data-on") === "1") return;
+    _staleBannerSig = sig;
     const warnIco =
       `<svg class="tv-stale-ico" viewBox="0 0 24 24" aria-hidden="true">` +
       `<path d="M12 3.2 22 20H2L12 3.2z"/>` +
@@ -1002,7 +1020,7 @@
       `</svg>`;
     el.innerHTML =
       warnIco +
-      `<span class="tv-stale-txt">Szinkron elakadt — az adat ${_esc(ageTxt)} frissült</span>`;
+      `<span class="tv-stale-txt">${lead} — az adat ${_esc(ageTxt)} frissült</span>`;
     el.setAttribute("data-on", "1");
   }
 
@@ -1468,8 +1486,11 @@
       `</div>`;
   }
 
-  const _FIXED_LOADINGS_PAGE_SIZE = 4;
-  const _FIXED_LOADINGS_INTERVAL_MS = 3600;
+  // Max. 2 sor / lap: a panel 1920x1080-on ~170px, 1600x900-on ~140px magas.
+  // 3-4 sornál a sor 36-51px lett, és a 2. sor (sofőr + rámpa/MV) félbevágódott.
+  const _FIXED_LOADINGS_PAGE_SIZE = 2;
+  // 9 s / lap: rendszám + GLABS + rámpa/MV + X/Y 3-5 m-ről is elolvasható.
+  const _FIXED_LOADINGS_INTERVAL_MS = 9000;
   const _FIXED_LOADINGS_SWAP_MS = 760;
 
   function _clearFixedLoadingsTimer(host) {
@@ -1486,6 +1507,7 @@
   }
 
   function _fixedLoadingsCanRun() {
+    if (!document.body.classList.contains("view-tv-mode")) return false;
     const page = document.getElementById("tv-page-report");
     return !page || page.classList.contains("is-active");
   }
@@ -1517,8 +1539,13 @@
     `</div>`;
   }
 
+  // null = üres helykitöltő sor a csonka utolsó lapon: a sormagasság lapról lapra
+  // azonos marad, és nem ismétlődik rendszám (korábban az első lapról töltötte fel).
   function _fixedLoadingsPageHtml(pageRows) {
-    return pageRows.map(_fixedLoadingRowHtml).join("");
+    return pageRows.map(r => r
+      ? _fixedLoadingRowHtml(r)
+      : `<div class="tv-fixed-loading-row is-filler" aria-hidden="true"></div>`
+    ).join("");
   }
 
   function _fixedLoadingsDots(count, idx) {
@@ -1527,12 +1554,15 @@
       Array.from({ length: count }, (_, i) =>
         `<span class="tv-fixed-dot${i === idx ? " is-active" : ""}"></span>`
       ).join("") +
+      `<span class="tv-fixed-pageno">${idx + 1}/${count}</span>` +
     `</div>`;
   }
 
   function _updateFixedLoadingsDots(host) {
     const dots = host.querySelectorAll(".tv-fixed-dot");
     dots.forEach((dot, i) => dot.classList.toggle("is-active", i === host._flIdx));
+    const pageNo = host.querySelector(".tv-fixed-pageno");
+    if (pageNo) pageNo.textContent = `${(host._flIdx || 0) + 1}/${dots.length}`;
   }
 
   function _showFixedLoadingsPage(host, nextIdx, animate) {
@@ -1607,12 +1637,15 @@
     host.dataset.sig = sig;
     host._flSig = sig;
 
-    const pageSize = Math.max(1, Math.min(_FIXED_LOADINGS_PAGE_SIZE, list.length || 1));
+    // Egyenletes elosztás a lapok között (pl. lapméret 4-nél 5 tétel = 3+2, nem
+    // 4+1). Max. _FIXED_LOADINGS_PAGE_SIZE sor / lap marad.
+    const pageCount = Math.max(1, Math.ceil(list.length / _FIXED_LOADINGS_PAGE_SIZE));
+    const pageSize = Math.max(1, Math.ceil((list.length || 1) / pageCount));
     const pages = [];
     for (let i = 0; i < list.length; i += pageSize) {
       const page = list.slice(i, i + pageSize);
       if (page.length < pageSize && list.length > pageSize) {
-        page.push(...list.slice(0, pageSize - page.length));
+        while (page.length < pageSize) page.push(null);
       }
       pages.push(page);
     }
@@ -1731,6 +1764,8 @@
     if (!page || !page.classList.contains("is-active")) return;
     if (!_allowOpening("report", reason)) {
       page.classList.remove("tv-opening-pending");
+      // A _renderReport a pending alatt kihagyta a gauge-ot; itt pótoljuk.
+      _renderGaugesNow({ animate: false, fromZero: false });
       return;
     }
     if (page._tvReportPhaseTimers) {
@@ -1777,6 +1812,9 @@
       // a számláló elkezd mozogni.
       later(1580, () => _renderGaugesNow({ only: "kg", animate: true, fromZero: true }));
       later(2200, () => _renderGaugesNow({ only: "loadings", animate: true, fromZero: true }));
+      // A nyitás alatt érkező poll a _renderReport-ban kimaradt (B13): a nyitó
+      // ablak végén nem animáltan utolérjük a legfrissebb _reportData-t.
+      later(4900, () => _renderGaugesNow({ animate: false, fromZero: false }));
 
       page.querySelectorAll(".tv-out-panel-totals .tv-out-panel-row b").forEach((el, i) => {
         _animateTextNumber(el, 1080 + i * 90, 720);
@@ -1836,7 +1874,12 @@
       (a, b) => (b && b.active && (b.kg || 0) > (a.kg || 0)) ? b : a, { kg: 0 });
     _setText("tv-report-hourly-sub",
       pk.kg > 0 ? `csúcsóra ${pk.label} · ${_fmtNum(pk.kg)} kg` : "");
-    _renderGaugesNow({ animate: false, fromZero: false });
+    // Nyitó-animáció alatt a poll ne ugrassa végállásba / ne indítsa újra a
+    // gauge-ot: a késleltetett nyitó render úgyis a friss _reportData-val fut.
+    const repPage = document.getElementById("tv-page-report");
+    const gaugeOpening = !!repPage &&
+      (repPage.classList.contains("tv-opening-pending") || repPage.classList.contains("tv-opening"));
+    if (!gaugeOpening) _renderGaugesNow({ animate: false, fromZero: false });
     if (!changed && _lastReportSig) return false;
     _lastReportSig = sig;
     _renderReportStats(o);
@@ -1922,7 +1965,16 @@
   function _resetPageTimer() {
     if (_pageTimer) clearTimeout(_pageTimer);
     _pageTimer = setTimeout(function tick() {
-      if (!_pagePinned) { _curPage = (_curPage + 1) % _PAGES.length; _applyPage("auto"); }
+      if (!_pagePinned) {
+        _curPage = (_curPage + 1) % _PAGES.length;
+        // Visszatérés a RAKODÁSOK-ra: a következő kamion-lap jön (animáció nélkül,
+        // a nyitó-reveal úgyis lefut), így 13+ rakodás is 2 cikluson belül látszik.
+        if (_curPage === 0) {
+          const pages = _getEffPages();
+          if (pages > 1) { _truckPage = (_truckPage + 1) % pages; _renderTruckPage(false); }
+        }
+        _applyPage("auto");
+      }
       _pageTimer = setTimeout(tick, _PAGE_DWELL);
     }, _PAGE_DWELL);
   }
@@ -1966,7 +2018,34 @@
     _setText("tv-clock", `${hh}:${mm}:${ss}`);
     _setText("tv-date",  `${_DAYS[now.getDay()]}, ${now.getFullYear()}. ${_MONTHS[now.getMonth()]} ${now.getDate()}.`);
     _updateRefreshArc();
-    if (hh==="00" && mm==="01" && ss==="00") setTimeout(()=>location.reload(),5000);
+    _renderFreshness();
+    // Napi újratöltés: napváltás-detektálás (nem egyetlen másodperces trigger,
+    // így egy kihagyott tick sem ejti ki), 00:01 után, TV-ben maradva.
+    const dayKey = now.toDateString();
+    if (!_clockDay) _clockDay = dayKey;
+    else if (dayKey !== _clockDay && (now.getHours() > 0 || now.getMinutes() >= 1)) {
+      _clockDay = dayKey;
+      _reloadForMidnight();
+    }
+  }
+
+  let _clockDay = "";
+
+  function _reloadForMidnight() {
+    if (_tvUpdateReloading) return;
+    _tvUpdateReloading = true;
+    _sessionSet(_TV_UPDATE_REOPEN_KEY, "1");
+    const url = new URL(location.href);
+    url.searchParams.set("_tvd", String(Date.now()));
+    setTimeout(() => {
+      // Ha közben kiléptek a TV-ből, ne töltsünk újra (és ne nyissuk vissza).
+      if (!document.body.classList.contains("view-tv-mode")) {
+        _sessionRemove(_TV_UPDATE_REOPEN_KEY);
+        _tvUpdateReloading = false;
+        return;
+      }
+      location.replace(url.toString());
+    }, 5000);
   }
 
   /* ──────────────────────────────────────────────────────────────
@@ -1995,15 +2074,40 @@
     try { sessionStorage.removeItem(key); } catch (_) {}
   }
 
+  // Kliensoldali elavulás: ha ennyi ideig nincs sikeres /api/tv/ops válasz
+  // (szerver leállt, kérés lóg, 5xx), a TV maga kapcsolja be a stale-bannert.
+  const _OPS_TIMEOUT_MS = 20_000;
+  const _OPS_CLIENT_STALE_MS = 75_000;
+  let _opsInFlight = null;      // AbortController a futó kérésre, különben null
+  let _opsLastOkAt = 0;         // utolsó sikeres válasz ideje (kliens óra)
+  let _opsWatchFrom = 0;        // TV-belépés ideje: ha még sosem volt sikeres válasz
+
   function _fetchOps() {
-    fetch("/api/tv/ops")
+    if (_opsInFlight) return;   // a lógó kérés mellé ne indítsunk újat
+    const ctl = (typeof AbortController === "function") ? new AbortController() : null;
+    const token = ctl || {};
+    _opsInFlight = token;
+    const to = setTimeout(() => { if (ctl) ctl.abort(); }, _OPS_TIMEOUT_MS);
+    fetch("/api/tv/ops", { cache: "no-store", signal: ctl ? ctl.signal : undefined })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (!d) return;
-        if (d.status === "loading") return;
-        _renderOps(d);
+        if (!d) throw new Error("tv ops: bad response");
+        if (d.status !== "loading") _renderOps(d);
+        _opsLastOkAt = Date.now();
+        _renderFreshness(d.freshness);
       })
-      .catch(()=>{});
+      .catch(() => { _renderFreshness(); })
+      .finally(() => {
+        clearTimeout(to);
+        if (_opsInFlight === token) _opsInFlight = null;
+      });
+  }
+
+  function _abortOpsFetch() {
+    if (_opsInFlight && typeof _opsInFlight.abort === "function") {
+      try { _opsInFlight.abort(); } catch (_) {}
+    }
+    _opsInFlight = null;
   }
 
   /* ──────────────────────────────────────────────────────────────
@@ -2067,6 +2171,10 @@
     clearTimeout(_tvUpdateConfirmTimer);
     _tvUpdateConfirmTimer = null;
     _clearOpeningTimers();
+    _clearFixedLoadingsTimer(document.getElementById("tv-gauge-parcel"));
+    const grid = document.getElementById("tv-trucks-grid");
+    if (grid && grid._tvSwapTimer) { clearTimeout(grid._tvSwapTimer); grid._tvSwapTimer = null; }
+    _abortOpsFetch();
   }
 
   function _iv(fn, ms) { const t = setInterval(fn, ms); _timers.push(t); }
@@ -2148,10 +2256,12 @@
     window.addEventListener("resize", _fitStage);
 
     _buildRefreshFab();
-    _applyGradient();
     _truckPage = 0; _truckSig = "";
     _lastRefreshTime = Date.now();
     _tvVersionSig = ""; _tvVersionCandidate = ""; _tvVersionCandidateSeen = 0; _tvUpdateReloading = false;
+    _clockDay = "";
+    _opsLastOkAt = 0; _opsWatchFrom = Date.now();
+    _lastFreshness = null; _lastFreshnessAt = 0; _staleBannerSig = "";
 
     // Oldalváltás: RAKODÁSOK alapból, auto-rotáció 35 mp, R/P + pillek vezérlik.
     _curPage = 0; _pagePinned = false;
@@ -2161,14 +2271,13 @@
 
     _tickClock();
     _iv(_tickClock, 1000);
-    _iv(_applyGradient, 2*60*1000);
 
     _fetchOps();
     _iv(_fetchOps, 30_000);
 
     _checkTvUpdate();
     _iv(_checkTvUpdate, _TV_UPDATE_POLL_MS);
-    _scheduleTruckPage();   // oldal 5–10 perc között
+    _scheduleTruckPage();   // rögzített RAKODÁSOK nézetben lapoz (auto-rotációnál az oldalváltás lapoz)
     document.addEventListener("keydown", _onKey);
   }
 

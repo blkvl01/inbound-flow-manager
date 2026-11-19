@@ -7,17 +7,71 @@
 
     // ── toast ────────────────────────────────────────────────────────────────
 
-    function _uldToast(msg, type) {
+    // opts.action = { label, run }  -> inline button (e.g. Visszavonás)
+    // opts.ms                        -> lifetime override
+    // Errors stay >= 6 s and get a close button; the container is a polite
+    // live region, error items are role="alert".
+    function _uldToast(msg, type, opts) {
         var container = document.getElementById('uld-toast');
-        if (!container) return;
+        if (!container) return null;
+        opts = opts || {};
+        type = type || 'ok';
+        if (!container.hasAttribute('aria-live')) {
+            container.setAttribute('role', 'status');
+            container.setAttribute('aria-live', 'polite');
+        }
+        var isError = type === 'error';
         var item = document.createElement('div');
-        item.className = 'uld-toast-item uld-toast-' + (type || 'ok');
-        item.textContent = msg;
-        container.appendChild(item);
-        setTimeout(function () {
+        item.className = 'uld-toast-item uld-toast-' + type;
+        if (isError) item.setAttribute('role', 'alert');
+        var text = document.createElement('span');
+        text.className = 'uld-toast-text';
+        text.textContent = msg;
+        item.appendChild(text);
+        var timer = null;
+        var closed = false;
+        function close() {
+            if (closed) return;
+            closed = true;
+            clearTimeout(timer);
             item.classList.add('uld-toast-fade');
             setTimeout(function () { if (item.parentNode) item.parentNode.removeChild(item); }, 320);
-        }, 2400);
+        }
+        if (opts.action && opts.action.label && typeof opts.action.run === 'function') {
+            item.classList.add('uld-toast-has-btn');
+            var act = document.createElement('button');
+            act.type = 'button';
+            act.className = 'uld-toast-action';
+            act.textContent = opts.action.label;
+            act.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                if (closed) return;
+                close();
+                opts.action.run();
+            });
+            item.appendChild(act);
+        }
+        if (isError) {
+            item.classList.add('uld-toast-has-btn');
+            var x = document.createElement('button');
+            x.type = 'button';
+            x.className = 'uld-toast-close';
+            x.setAttribute('aria-label', 'Bezárás');
+            x.title = 'Bezárás';
+            x.innerHTML = '<span class="uld-toast-close-icon" aria-hidden="true"></span>';
+            x.addEventListener('click', function (ev) { ev.stopPropagation(); close(); });
+            item.appendChild(x);
+        }
+        container.appendChild(item);
+        var ms = Number(opts.ms) || (isError ? 6500 : (opts.action ? 6000 : 2400));
+        function arm() { clearTimeout(timer); timer = setTimeout(close, ms); }
+        // Hovering an actionable toast pauses its timer.
+        if (opts.action || isError) {
+            item.addEventListener('mouseenter', function () { clearTimeout(timer); });
+            item.addEventListener('mouseleave', arm);
+        }
+        arm();
+        return { close: close };
     }
 
     // ── Dash store trigger / set_props ──────────────────────────────────────
@@ -245,24 +299,6 @@
         });
     }
 
-    function captureUldDom() {
-        var grid = document.getElementById('uld-stacks-grid');
-        var list = document.querySelector('.uld-list');
-        return {
-            grid: grid ? grid.innerHTML : null,
-            list: list ? list.innerHTML : null
-        };
-    }
-
-    function restoreUldDom(snapshot) {
-        if (!snapshot) return;
-        var grid = document.getElementById('uld-stacks-grid');
-        var list = document.querySelector('.uld-list');
-        if (grid && snapshot.grid !== null) grid.innerHTML = snapshot.grid;
-        if (list && snapshot.list !== null) list.innerHTML = snapshot.list;
-        reconcileSelection();
-    }
-
     function stackRevision(stackEl) {
         var value = stackEl && stackEl.dataset ? parseInt(stackEl.dataset.stackRevision || '0', 10) : 0;
         return Number.isFinite(value) ? value : 0;
@@ -393,15 +429,20 @@
 
             var cdTime  = el.querySelector('.uld-cd-time');
             var cdLabel = el.querySelector('.uld-cd-label');
-            if (cdTime)  cdTime.textContent  = text;
-            if (cdLabel) cdLabel.textContent = diff >= 0 ? 'Hátra' : 'Lejárt';
+            // Write only on change: an unchanged minute must not touch the DOM
+            // (each write was a grid mutation -> full stack re-layout).
+            var label = diff >= 0 ? 'Hátra' : 'Lejárt';
+            if (cdTime && cdTime.textContent !== text) cdTime.textContent = text;
+            if (cdLabel && cdLabel.textContent !== label) cdLabel.textContent = label;
 
             var status = diff <= 0        ? 'expired'
                        : diff <= 6*3600  ? 'critical'
                        : diff <= 12*3600 ? 'warning'
                                          : 'ok';
-            el.className = el.className.replace(/uld-cd-\w+/g, '').trim();
-            el.classList.add('uld-countdown', 'uld-cd-' + status);
+            if (!el.classList.contains('uld-cd-' + status)) {
+                el.className = el.className.replace(/uld-cd-\w+/g, '').trim();
+                el.classList.add('uld-countdown', 'uld-cd-' + status);
+            }
         });
     }
     setInterval(updateCountdowns, 30000);
@@ -816,7 +857,7 @@
                         '<div class="uld-manual-kicker">ULD szerkesztése</div>' +
                         '<div class="uld-manual-title" id="uld-edit-title">ULD szerkesztése</div>' +
                     '</div>' +
-                    '<button type="button" id="uld-edit-close" class="uld-manual-close" title="Bezárás">X</button>' +
+                    '<button type="button" id="uld-edit-close" class="uld-manual-close" title="Bezárás" aria-label="Bezárás"><span class="fi fi-x" aria-hidden="true"></span></button>' +
                 '</div>' +
                 '<div class="uld-edit-grid">' +
                     '<label class="uld-manual-field"><span>AWB <em>kötelező</em></span><input id="uld-edit-awb" class="uld-manual-input" inputmode="numeric" autocomplete="off"></label>' +
@@ -964,8 +1005,13 @@
         var color = ghaColorFor(gha);
         var ghaMeta = row.querySelector('.uld-meta-gha');
         if (ghaMeta) {
-            if (color) ghaMeta.style.setProperty('--gha-color', color);
-            else ghaMeta.style.removeProperty('--gha-color');
+            if (color) {
+                ghaMeta.style.setProperty('--gha-color', color);
+                ghaMeta.style.setProperty('--gha-rgb', cssRgb(color));
+            } else {
+                ghaMeta.style.removeProperty('--gha-color');
+                ghaMeta.style.removeProperty('--gha-rgb');
+            }
         }
         var stackBadge = row.querySelector('.uld-in-stack-badge');
         if (stackBadge) {
@@ -981,12 +1027,18 @@
         }
         if (color && row.classList.contains('uld-row-in-stack')) {
             row.style.setProperty('--stack-accent', color);
+            row.style.setProperty('--stack-accent-rgb', cssRgb(color));
             row.style.setProperty('--stack-accent-bg', color + '14');
         }
         // Drives the edit highlight glow so it matches the (possibly new) GHA hue,
         // even for rows that aren't in a stack and carry no --stack-accent.
-        if (color) row.style.setProperty('--edit-pulse-accent', color);
-        else row.style.removeProperty('--edit-pulse-accent');
+        if (color) {
+            row.style.setProperty('--edit-pulse-accent', color);
+            row.style.setProperty('--edit-pulse-rgb', cssRgb(color));
+        } else {
+            row.style.removeProperty('--edit-pulse-accent');
+            row.style.removeProperty('--edit-pulse-rgb');
+        }
     }
 
     // Az ULD-lista React/Dash tulajdonú gyerekelemeihez nem nyúlunk kézzel.
@@ -1172,7 +1224,8 @@
     }
 
     function uldElements() {
-        return Array.from(document.querySelectorAll('.uld-row[data-uld], .uld-si[data-uld]'));
+        return Array.from(document.querySelectorAll('.uld-row[data-uld], .uld-si[data-uld]'))
+            .filter(function (el) { return !isDedupHidden(el); });
     }
 
     function uldElementsFor(ulds) {
@@ -1181,7 +1234,8 @@
     }
 
     function stackElements() {
-        return Array.from(document.querySelectorAll('.uld-stack[data-stack-id]'));
+        return Array.from(document.querySelectorAll('.uld-stack[data-stack-id]'))
+            .filter(function (el) { return !isDedupHidden(el); });
     }
 
     // ── Stack accordion (collapse / expand) ─────────────────────────────────
@@ -1234,10 +1288,22 @@
         });
     }
 
+    // Stack name is the keyboard toggle (role=button): mirror the open state.
+    function syncStackAriaExpanded(stackEl) {
+        var nameEl = stackEl && stackEl.querySelector('.uld-stack-hdr .uld-stack-name');
+        if (!nameEl) return;
+        if (stackEl.classList.contains('uld-stack-collapsible')) {
+            nameEl.setAttribute('aria-expanded', stackEl.classList.contains('uld-stack-expanded') ? 'true' : 'false');
+        } else {
+            nameEl.removeAttribute('aria-expanded');
+        }
+    }
+
     function expandStackEl(stackEl, animate, scroll) {
         var body = stackBody(stackEl);
         if (!body) return;
         stackEl.classList.add('uld-stack-expanded');
+        syncStackAriaExpanded(stackEl);
         if (animate === false) {
             applyStackBodyScroll(body);
             return;
@@ -1261,6 +1327,7 @@
         if (!body) return;
         if (animate === false) {
             stackEl.classList.remove('uld-stack-expanded');
+            syncStackAriaExpanded(stackEl);
             body.style.maxHeight = '';   // fall back to the CSS collapsed (0) height
             body.style.overflowY = '';
             body.style.overflowX = '';
@@ -1270,6 +1337,7 @@
         body.style.maxHeight = Math.round(body.getBoundingClientRect().height) + 'px';
         void body.offsetHeight;
         stackEl.classList.remove('uld-stack-expanded');
+        syncStackAriaExpanded(stackEl);
         body.style.maxHeight = '0px';
         body.style.overflowY = 'hidden';
         body.style.overflowX = 'hidden';
@@ -1483,6 +1551,25 @@
         refreshStackToolButtons();
     }
 
+    // Write-if-changed helpers: an unconditional textContent write replaces the
+    // text node (childList mutation) even for the same value, which fed the
+    // selection MutationObserver back into itself (~20 writes/s while idle).
+    function setTextIfChanged(el, value) {
+        if (!el) return;
+        value = String(value);
+        if (el.textContent !== value) el.textContent = value;
+    }
+    function setAttrIfChanged(el, name, value) {
+        if (!el) return;
+        value = String(value);
+        if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+    }
+    function toggleClassIfChanged(el, cls, on) {
+        if (!el) return;
+        on = !!on;
+        if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on);
+    }
+
     // Keep the two toolbar buttons' labels/active state in sync with the live
     // stack/selection state (also after Dash re-renders the stack grid).
     function refreshStackToolButtons() {
@@ -1491,16 +1578,16 @@
             // Locked to the focus-mode flag only — a stack being open on its own (search
             // auto-open, single toggle) must NOT flip this button to the active state.
             var expanded = stacksFocusMode;
-            expandBtn.textContent = expanded ? 'Mind zárása' : 'Mind nyitása';
-            expandBtn.classList.toggle('uld-stack-tool-active', !!expanded);
-            expandBtn.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+            setTextIfChanged(expandBtn, expanded ? 'Mind zárása' : 'Mind nyitása');
+            toggleClassIfChanged(expandBtn, 'uld-stack-tool-active', expanded);
+            setAttrIfChanged(expandBtn, 'aria-pressed', expanded ? 'true' : 'false');
         }
         var selBtn = document.getElementById('uld-select-all-stacks-btn');
         if (selBtn) {
             var allSel = allStackekSelected();
-            selBtn.textContent = allSel ? 'Kijelölés törlése' : 'Mind kijelölése';
-            selBtn.classList.toggle('uld-stack-tool-active', !!allSel);
-            selBtn.setAttribute('aria-pressed', allSel ? 'true' : 'false');
+            setTextIfChanged(selBtn, allSel ? 'Kijelölés törlése' : 'Mind kijelölése');
+            toggleClassIfChanged(selBtn, 'uld-stack-tool-active', allSel);
+            setAttrIfChanged(selBtn, 'aria-pressed', allSel ? 'true' : 'false');
         }
     }
 
@@ -1522,30 +1609,61 @@
                 if (s.dataset.stackId) expandedStackek.add(s.dataset.stackId);
             });
         }
+        // Batched: decide (no layout) -> class writes -> ONE read pass for all
+        // open bodies -> style writes only where they differ -> at most one
+        // reflow before transitions are restored. Unchanged stacks are untouched.
+        var plan = [];
         stackElements().forEach(function (stackEl) {
             var body = stackBody(stackEl);
             if (!body) return;
-            if (!stackEl.classList.contains('uld-stack-collapsible')) {
-                // Empty / non-collapsible stacks are always open (drop hint shown).
-                stackEl.classList.remove('uld-stack-expanded');
-                body.style.maxHeight = '';
-                body.style.overflowY = '';
-                body.style.overflowX = '';
-                return;
+            // Empty / non-collapsible stacks are always open (drop hint shown).
+            var open = false;
+            if (stackEl.classList.contains('uld-stack-collapsible')) {
+                var id = stackEl.dataset.stackId;
+                // A search hit ALWAYS opens its stack so the matched ULD is visible — even
+                // after "Mind összecsuk" (forceStackekCollapsed). Searching is an explicit
+                // "find this ULD" intent that must override the collapsed view state.
+                var hasSearchHit = stackEl.classList.contains('uld-stack-search-hit');
+                open = !!(hasSearchHit || (!forceStackekCollapsed && id && expandedStackek.has(id)));
             }
-            var id = stackEl.dataset.stackId;
-            // A search hit ALWAYS opens its stack so the matched ULD is visible — even
-            // after "Mind összecsuk" (forceStackekCollapsed). Searching is an explicit
-            // "find this ULD" intent that must override the collapsed view state.
-            var hasSearchHit = stackEl.classList.contains('uld-stack-search-hit');
-            var wantOpen = hasSearchHit || (!forceStackekCollapsed && id && expandedStackek.has(id));
-            var prevTr = body.style.transition;
-            body.style.transition = 'none';
-            if (wantOpen) expandStackEl(stackEl, false);
-            else collapseStackEl(stackEl, false);
-            void body.offsetHeight; // reflow so the restore doesn't animate
-            body.style.transition = prevTr;
+            plan.push({ el: stackEl, body: body, open: open });
         });
+        var frozen = [];
+        function freeze(p) {
+            if (p.frozen) return;
+            p.frozen = true;
+            p.prevTr = p.body.style.transition;
+            p.body.style.transition = 'none';
+            frozen.push(p);
+        }
+        plan.forEach(function (p) {
+            if (p.el.classList.contains('uld-stack-expanded') === p.open) return;
+            freeze(p);
+            p.el.classList.toggle('uld-stack-expanded', p.open);
+        });
+        plan.forEach(function (p) {
+            if (!p.open) return;
+            p.openHeight = stackBodyOpenHeight(p.body);
+            p.scrollH = p.body.scrollHeight;
+        });
+        plan.forEach(function (p) {
+            var mh = '', oy = '', ox = '';
+            if (p.open) {
+                mh = p.openHeight + 'px';
+                oy = p.scrollH > p.openHeight + 1 ? 'auto' : 'hidden';
+                ox = 'hidden';
+            }
+            var s = p.body.style;
+            if (s.maxHeight === mh && s.overflowY === oy && s.overflowX === ox) return;
+            freeze(p);
+            s.maxHeight = mh;
+            s.overflowY = oy;
+            s.overflowX = ox;
+        });
+        if (frozen.length) {
+            void frozen[0].body.offsetHeight; // one reflow so the restore doesn't animate
+            frozen.forEach(function (p) { p.body.style.transition = p.prevTr; });
+        }
         capStackGridHeight();
         refreshStackToolButtons();
     }
@@ -1562,13 +1680,12 @@
 
     function applySelectionClasses() {
         uldElements().forEach(function (el) {
-            el.classList.toggle('uld-selected', selectedUlds.has(el.dataset.uld));
+            toggleClassIfChanged(el, 'uld-selected', selectedUlds.has(el.dataset.uld));
         });
         stackElements().forEach(function (el) {
             var selected = selectedStackek.has(el.dataset.stackId);
-            el.classList.toggle('uld-stack-selected', selected);
-            var btn = el.querySelector('.uld-stack-select');
-            if (btn) btn.textContent = selected ? 'Kijelölve' : 'Kijelölés';
+            toggleClassIfChanged(el, 'uld-stack-selected', selected);
+            setTextIfChanged(el.querySelector('.uld-stack-select'), selected ? 'Kijelölve' : 'Kijelölés');
         });
         updateSelectionBar();
         refreshStackToolButtons();
@@ -1581,13 +1698,11 @@
         var stackMode = selectedStackek.size > 0;
         var count = stackMode ? selectedStackek.size : selectedUlds.size;
         var wasActive = bar.classList.contains('uld-selection-active');
-        bar.classList.toggle('uld-selection-active', count > 0);
-        bar.classList.toggle('uld-stack-selection-mode', stackMode);
-        if (document.body) document.body.classList.toggle('uld-selection-bar-visible', count > 0);
-        var label = bar.querySelector('.uld-selection-count');
-        if (label) label.textContent = String(count);
-        var labelText = bar.querySelector('.uld-selection-label');
-        if (labelText) labelText.textContent = stackMode ? 'stacks selected' : 'ULD kijelölve';
+        toggleClassIfChanged(bar, 'uld-selection-active', count > 0);
+        toggleClassIfChanged(bar, 'uld-stack-selection-mode', stackMode);
+        if (document.body) toggleClassIfChanged(document.body, 'uld-selection-bar-visible', count > 0);
+        setTextIfChanged(bar.querySelector('.uld-selection-count'), String(count));
+        setTextIfChanged(bar.querySelector('.uld-selection-label'), stackMode ? 'stack kijelölve' : 'ULD kijelölve');
         var pulseSig = (stackMode ? 'S' : 'U') + ':' + count;
         if (!count) {
             _lastSelectionPulseSig = '';
@@ -1619,11 +1734,11 @@
         var btn = document.querySelector('.uld-selection-stack-prep-btn');
         if (!btn) return;
         if (!stackMode) {
-            btn.classList.remove('uld-selection-prep-active');
-            btn.textContent = 'Kész';
-            btn.dataset.uldIdleLabel = btn.textContent;
-            btn.dataset.prepMode = 'prepare';
-            btn.title = 'Kijelölt stackek készre jelölése';
+            toggleClassIfChanged(btn, 'uld-selection-prep-active', false);
+            setTextIfChanged(btn, 'Kész');
+            setAttrIfChanged(btn, 'data-uld-idle-label', 'Kész');
+            setAttrIfChanged(btn, 'data-prep-mode', 'prepare');
+            setAttrIfChanged(btn, 'title', 'Kijelölt stackek készre jelölése');
             return;
         }
         var sel = selectedStackElements().filter(function (s) {
@@ -1631,13 +1746,14 @@
         });
         var prepared = sel.filter(isPreparedStack);
         var allPrepared = sel.length > 0 && prepared.length === sel.length;
-        btn.classList.toggle('uld-selection-prep-active', allPrepared);
-        btn.textContent = allPrepared ? 'Kész' : 'Készre jelöl';
-        btn.dataset.uldIdleLabel = btn.textContent;
-        btn.dataset.prepMode = allPrepared ? 'unprepare' : 'prepare';
-        btn.title = allPrepared
-            ? 'Kész jelölés törlése from selected stacks'
-            : 'Kijelölt stackek készre jelölése';
+        var prepLabel = allPrepared ? 'Kész' : 'Készre jelöl';
+        toggleClassIfChanged(btn, 'uld-selection-prep-active', allPrepared);
+        setTextIfChanged(btn, prepLabel);
+        setAttrIfChanged(btn, 'data-uld-idle-label', prepLabel);
+        setAttrIfChanged(btn, 'data-prep-mode', allPrepared ? 'unprepare' : 'prepare');
+        setAttrIfChanged(btn, 'title', allPrepared
+            ? 'Kész jelölés törlése a kijelölt stackekről'
+            : 'Kijelölt stackek készre jelölése');
     }
 
     function selectedGhaSet() {
@@ -1755,8 +1871,10 @@
             chip.title = e.prepared
                 ? ('Készre jelölt stack – előbb töröld a kész jelölést: ' + e.name)
                 : (e.compat
-                    ? ('Move selected ULDs: ' + e.name)
-                    : ('Incompatible GHA: ' + (e.gha || '?') + ' vs ' + Array.from(selGhas).join(', ')));
+                    ? ('Kijelöltek áthelyezése: ' + e.name)
+                    : ('Eltérő GHA: ' + (e.gha || '?') + ' / ' + Array.from(selGhas).join(', ')));
+            if (e.compat) chip.removeAttribute('aria-disabled');
+            else chip.setAttribute('aria-disabled', 'true');
             var col = '';
             try {
                 col = (e.el && e.el.style && e.el.style.getPropertyValue('--stack-gha-border')) || '';
@@ -1764,13 +1882,14 @@
             } catch (err) { col = ''; }
             if (e.gha && col) {
                 chip.style.setProperty('--chip-color', col);
+                chip.style.setProperty('--chip-color-rgb', cssRgb(col, '100,116,139'));
                 chip.style.setProperty('--chip-bg', col + '1a');
                 chip.style.setProperty('--chip-border', col + '55');
                 chip.style.setProperty('--chip-bg-hover', col + '28');
                 chip.style.setProperty('--chip-border-hover', col + '99');
                 chip.style.setProperty('--chip-glow', col + '40');
             } else {
-                ['--chip-color','--chip-bg','--chip-border','--chip-bg-hover','--chip-border-hover','--chip-glow']
+                ['--chip-color','--chip-color-rgb','--chip-bg','--chip-border','--chip-bg-hover','--chip-border-hover','--chip-glow']
                     .forEach(function (p) { chip.style.removeProperty(p); });
             }
             chip.innerHTML =
@@ -2055,7 +2174,8 @@
     }
 
     function stackItems(stackEl) {
-        return Array.from(stackEl.querySelectorAll('.uld-si[data-uld]'));
+        return Array.from(stackEl.querySelectorAll('.uld-si[data-uld]'))
+            .filter(function (el) { return !isDedupHidden(el); });
     }
 
     function stackCol(stackEl) {
@@ -2172,18 +2292,6 @@
         return document.querySelector('.uld-si[data-uld="' + cssEsc(n || uld) + '"]')
             || (n && n !== uld ? document.querySelector('.uld-si[data-uld="' + cssEsc(uld) + '"]') : null);
     }
-    function stackItemsForUld(uld) {
-        var n = normalizeUld(uld);
-        var result = [];
-        var byNorm = document.querySelectorAll('.uld-si[data-uld="' + cssEsc(n || uld) + '"]');
-        byNorm.forEach(function (el) { result.push(el); });
-        if (n && n !== uld) {
-            var byRaw = document.querySelectorAll('.uld-si[data-uld="' + cssEsc(uld) + '"]');
-            byRaw.forEach(function (el) { if (result.indexOf(el) === -1) result.push(el); });
-        }
-        return result;
-    }
-
     // ── "Összekészítve" lock helpers ───────────────────────────────────────
     // Prepared (összekészítve) stacks lock the ULDs inside them — no drag in/out,
     // no reorder, no × remove, no chip add, no inclusion in "+ Új stack" batch,
@@ -2237,6 +2345,19 @@
     // Fixed brand color per GHA — mirrors _GHA_FIXED_COLORS in app.py so client
     // rendered tables/popups match the server-side stack colors.
     var GHA_FIXED_COLORS = { 'menzies': '#ffd60a', 'celebi': '#ff6b35', 'as cargo': '#32ade6' };
+    // '#rrggbb' / 'rgba(r,g,b,a)' -> 'r,g,b' for rgba(var(--x-rgb), a) in CSS
+    // (the portable renderer drops color-mix()).
+    function cssRgb(c, d) {
+        var s = String(c || '').trim(), m;
+        if (s.charAt(0) === '#') {
+            var h = s.slice(1);
+            if (h.length === 3 || h.length === 4) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+            if (/^[0-9a-f]{6}/i.test(h)) return parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' + parseInt(h.slice(4, 6), 16);
+        } else if ((m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(s))) {
+            return m[1] + ',' + m[2] + ',' + m[3];
+        }
+        return d || '99,102,241';
+    }
     function ghaColorFor(gha) {
         return GHA_FIXED_COLORS[String(gha || '').trim().toLowerCase()] || '';
     }
@@ -2337,7 +2458,7 @@
                 '</div>' +
                 '<span class="uld-si-pos"></span>' +
             '</div>' +
-            '<button class="uld-si-remove" title="Eltávolítás stackből" data-uld="' + _esc(item.dataset.uld) + '">×</button>';
+            '<button type="button" class="uld-si-remove" title="Eltávolítás stackből" aria-label="' + _esc(item.dataset.uld) + ' eltávolítása a stackből" data-uld="' + _esc(item.dataset.uld) + '"><span class="fi fi-x" aria-hidden="true"></span></button>';
         return item;
     }
 
@@ -2374,8 +2495,8 @@
         card.dataset.stackId = stack.id || '';
         card.innerHTML =
             '<div class="uld-stack-hdr">' +
-                '<span class="uld-stack-caret" aria-hidden="true">▸</span>' +
-                '<span class="uld-stack-name" title="Dupla kattintás az átnevezéshez"></span>' +
+                '<span class="uld-stack-caret" aria-hidden="true"><span class="fi fi-chev-right" aria-hidden="true"></span></span>' +
+                '<span class="uld-stack-name" title="Dupla kattintás vagy F2: átnevezés" role="button" tabindex="0"></span>' +
                 '<span class="uld-stack-cnt"></span>' +
                 '<div class="uld-stack-actions">' +
                     '<button class="uld-stack-act uld-stack-select" title="Stack kijelölése">Kijelölés</button>' +
@@ -2510,10 +2631,12 @@
             ghaEl.style.display = stack.single_gha ? '' : 'none';
             if (stack.gha_color) {
                 ghaEl.style.setProperty('--gha-color', stack.gha_color);
+                ghaEl.style.setProperty('--gha-rgb', cssRgb(stack.gha_color));
                 ghaEl.style.setProperty('--gha-bg', stack.gha_color + '22');
                 ghaEl.style.setProperty('--gha-border', stack.gha_color + '55');
             } else {
                 ghaEl.style.removeProperty('--gha-color');
+                ghaEl.style.removeProperty('--gha-rgb');
                 ghaEl.style.removeProperty('--gha-bg');
                 ghaEl.style.removeProperty('--gha-border');
             }
@@ -2521,7 +2644,7 @@
         var delBtn = card.querySelector('.uld-stack-del');
         if (delBtn) {
             delBtn.dataset.stackId = stack.id;
-            delBtn.textContent = '×';
+            delBtn.textContent = '';
         }
         var createdMeta = card.querySelector('.uld-stack-created-meta');
         if (createdMeta) createdMeta.textContent = formatStackCreatedMeta(stack);
@@ -2552,10 +2675,12 @@
             var entry = byUld[row.dataset.uld];
             if (entry) {
                 row.style.setProperty('--stack-accent', entry.color || 'rgba(99,102,241,.55)');
+                row.style.setProperty('--stack-accent-rgb', cssRgb(entry.color));
                 row.style.setProperty('--stack-accent-bg', entry.color ? entry.color + '14' : 'rgba(99,102,241,.06)');
                 setRowStackBadge(row.dataset.uld, entry.name);
             } else {
                 row.style.removeProperty('--stack-accent');
+                row.style.removeProperty('--stack-accent-rgb');
                 row.style.removeProperty('--stack-accent-bg');
                 clearRowStackBadge(row.dataset.uld);
             }
@@ -2665,19 +2790,19 @@
     function applyPreparedFromDom() {
         var preparedUlds = new Set();
         document.querySelectorAll('.uld-stack[data-prepared="1"]').forEach(function (stackEl) {
-            stackEl.classList.add('uld-stack-prepared');
+            toggleClassIfChanged(stackEl, 'uld-stack-prepared', true);
             stackEl.querySelectorAll('.uld-si[data-uld]').forEach(function (si) {
                 preparedUlds.add(si.dataset.uld);
-                si.dataset.prepared = '1';
+                setAttrIfChanged(si, 'data-prepared', '1');
             });
         });
         document.querySelectorAll('.uld-stack:not([data-prepared="1"])').forEach(function (stackEl) {
-            if (stackEl.dataset.prepared === '0') stackEl.classList.remove('uld-stack-prepared');
+            if (stackEl.dataset.prepared === '0') toggleClassIfChanged(stackEl, 'uld-stack-prepared', false);
         });
         document.querySelectorAll('.uld-row[data-uld]').forEach(function (row) {
             var inPrepared = preparedUlds.has(row.dataset.uld);
-            row.classList.toggle('uld-row-prepared', inPrepared);
-            row.dataset.prepared = inPrepared ? '1' : '0';
+            toggleClassIfChanged(row, 'uld-row-prepared', inPrepared);
+            setAttrIfChanged(row, 'data-prepared', inPrepared ? '1' : '0');
         });
     }
 
@@ -2762,6 +2887,7 @@
             ghaEl.style.display = singleGha ? '' : 'none';
             if (!singleGha) {
                 ghaEl.style.removeProperty('--gha-color');
+                ghaEl.style.removeProperty('--gha-rgb');
                 ghaEl.style.removeProperty('--gha-bg');
                 ghaEl.style.removeProperty('--gha-border');
                 stackEl.style.removeProperty('--stack-gha-border');
@@ -2800,20 +2926,6 @@
         }
     }
 
-    function removeExistingStackItems(ulds) {
-        var touched = new Set();
-        ulds.forEach(function (uld) {
-            stackItemsForUld(uld).forEach(function (el) {
-                var stack = el.closest('.uld-stack[data-stack-id]');
-                if (stack) touched.add(stack);
-                el.remove();
-            });
-        });
-        touched.forEach(function (stack) {
-            refreshStackMeta(stack);
-        });
-    }
-
     // Remove duplicate STACK CARDS that share a data-stack-id. This happens when an
     // optimistic client-made card (.uld-stack-clientmade, appended by hand on the
     // create path) survives next to the Dash/React-owned card the server re-render
@@ -2822,7 +2934,21 @@
     // together" (selection/drag is keyed by id) and "delete together". Keep one card
     // per id, preferring the React-owned (non-clientmade) card; among equals keep the
     // last in document order (the freshest server re-render) and drop the strays.
-    function cleanupDuplicateStackCards() {
+    // Dedup must never .remove() a React-owned node (React's next commit would
+    // removeChild an already-detached node and throw - uld_stacks_optimistic_dom).
+    // Client-made/optimistic nodes are ours and are removed; React-owned
+    // duplicates are only hidden (.uld-dedup-hidden). Each pass recomputes the
+    // full hidden set and un-hides anything no longer a duplicate, so a node React
+    // later reuses for a legit render never stays invisible. DOM is only touched
+    // when the state actually changes (no observer self-trigger).
+    function isClientOwnedNode(el) {
+        return el.classList.contains('uld-optimistic') || el.classList.contains('uld-stack-clientmade');
+    }
+    function isDedupHidden(el) {
+        return !!(el && el.closest && el.closest('.uld-dedup-hidden'));
+    }
+
+    function cleanupDuplicateStackCards(toHide) {
         var grid = document.getElementById('uld-stacks-grid');
         if (!grid) return;
         var byId = {};
@@ -2845,7 +2971,9 @@
                 else if (keeperClient === cardClient) keeper = c;
             });
             cards.forEach(function (c) {
-                if (c !== keeper && c.parentNode) c.parentNode.removeChild(c);
+                if (c === keeper) return;
+                if (isClientOwnedNode(c)) { if (c.parentNode) c.parentNode.removeChild(c); }
+                else if (toHide) toHide.add(c);
             });
         });
     }
@@ -2853,11 +2981,14 @@
     // Remove optimistic items that have a server-rendered counterpart in the same stack.
     // Groups items by NORMALIZED uld so raw/normalized variants don't slip through.
     function cleanupOptimisticDuplicates() {
-        cleanupDuplicateStackCards();
+        var grid = document.getElementById('uld-stacks-grid');
+        var toHide = new Set();
+        var touched = new Set();
+        cleanupDuplicateStackCards(toHide);
         // Defensive: an *empty* client-made stack card is always stale now that we
         // never build optimistic empty cards (real empty stacks are Dash/React-owned).
         // Drop any that linger so they can't sit "glued" to a real card and move /
-        // select / delete with it. Client-made cards that carry ULDs are left alone —
+        // select / delete with it. Client-made cards that carry ULDs are left alone -
         // they're the legitimate optimistic fly-animation targets the dedup handles.
         document.querySelectorAll('.uld-stack-clientmade').forEach(function (card) {
             if (!card.querySelector('.uld-si[data-uld]') && card.parentNode) {
@@ -2865,7 +2996,18 @@
             }
         });
         cleanupRowStackBadges();
-        document.querySelectorAll('.uld-stack[data-stack-id]').forEach(function (stackEl) {
+        function removeOwn(el) {
+            var s = el.closest('.uld-stack[data-stack-id]');
+            if (s) touched.add(s);
+            if (el.parentNode) el.parentNode.removeChild(el);
+        }
+        function dropItem(el) {
+            if (isClientOwnedNode(el)) removeOwn(el);
+            else toHide.add(el);
+        }
+        var liveStacks = Array.from(document.querySelectorAll('.uld-stack[data-stack-id]'))
+            .filter(function (s) { return !toHide.has(s); });
+        liveStacks.forEach(function (stackEl) {
             var byUld = {};
             stackEl.querySelectorAll('.uld-si[data-uld]').forEach(function (el) {
                 var uld = normalizeUld(el.dataset.uld) || el.dataset.uld;
@@ -2873,43 +3015,39 @@
                 if (el.classList.contains('uld-optimistic')) byUld[uld].optimistic.push(el);
                 else byUld[uld].real.push(el);
             });
-            var changed = false;
             Object.keys(byUld).forEach(function (uld) {
                 var entry = byUld[uld];
-                // Real wins over optimistic — remove all optimistic duplicates.
+                // Real wins over optimistic - remove all optimistic duplicates.
                 if (entry.real.length > 0 && entry.optimistic.length > 0) {
-                    entry.optimistic.forEach(function (el) { el.remove(); });
-                    changed = true;
+                    entry.optimistic.forEach(removeOwn);
                 }
-                // Multiple optimistic for same ULD (raw vs normalized variant) — keep first.
+                // Multiple optimistic for same ULD (raw vs normalized variant) - keep first.
                 if (entry.real.length === 0 && entry.optimistic.length > 1) {
-                    entry.optimistic.slice(1).forEach(function (el) { el.remove(); });
-                    changed = true;
+                    entry.optimistic.slice(1).forEach(removeOwn);
                 }
-                // Multiple real for same ULD (server bug or race) — keep first.
+                // Multiple real for same ULD (server bug or race) - keep first, hide the rest.
                 if (entry.real.length > 1) {
-                    entry.real.slice(1).forEach(function (el) { el.remove(); });
-                    changed = true;
+                    entry.real.slice(1).forEach(function (el) { toHide.add(el); });
                 }
             });
-            // Remove stale "empty" hint when real or optimistic ULD items are present
+            // Hide the stale "empty" hint when real or optimistic ULD items are present.
             var col = stackCol(stackEl);
-            if (col) {
-                var allItems = stackItems(stackEl);
-                var hint = col.querySelector('.uld-stack-empty-hint');
-                if (allItems.length > 0 && hint) {
-                    hint.remove();
-                    changed = true;
-                }
+            var hint = col ? col.querySelector('.uld-stack-empty-hint') : null;
+            if (hint) {
+                var visibleItems = Array.from(stackEl.querySelectorAll('.uld-si[data-uld]'))
+                    .filter(function (el) { return !toHide.has(el); });
+                if (visibleItems.length > 0) toHide.add(hint);
             }
-            if (changed) refreshStackMeta(stackEl);
         });
         // Cross-stack dedup: a ULD must live in at most one stack.
         var globalByUld = {};
-        document.querySelectorAll('.uld-si[data-uld]').forEach(function (el) {
-            var key = normalizeUld(el.dataset.uld) || el.dataset.uld;
-            if (!globalByUld[key]) globalByUld[key] = [];
-            globalByUld[key].push(el);
+        liveStacks.forEach(function (stackEl) {
+            stackEl.querySelectorAll('.uld-si[data-uld]').forEach(function (el) {
+                if (toHide.has(el) || !el.isConnected) return;
+                var key = normalizeUld(el.dataset.uld) || el.dataset.uld;
+                if (!globalByUld[key]) globalByUld[key] = [];
+                globalByUld[key].push(el);
+            });
         });
         Object.keys(globalByUld).forEach(function (key) {
             var arr = globalByUld[key];
@@ -2921,46 +3059,26 @@
                 if (ao !== bo) return ao - bo;
                 return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
             });
-            var touched = new Set();
-            arr.slice(1).forEach(function (el) {
+            arr.slice(1).forEach(dropItem);
+        });
+        // Apply the hidden set - only nodes whose state really changes are touched.
+        if (grid) {
+            grid.querySelectorAll('.uld-dedup-hidden').forEach(function (el) {
+                if (toHide.has(el)) return;
+                el.classList.remove('uld-dedup-hidden');
+                el.style.display = '';
                 var s = el.closest('.uld-stack[data-stack-id]');
                 if (s) touched.add(s);
-                el.remove();
             });
-            touched.forEach(refreshStackMeta);
-        });
-    }
-
-    function optimisticHozzáadásToStack(ulds, stackEl, insertAt, stackName) {
-        var col = stackCol(stackEl);
-        if (!col) return;
-        var sourceByUld = {};
-        ulds.forEach(function (uld) { sourceByUld[uld] = sourceInfo(uld); });
-        removeExistingStackItems(ulds);
-        var hint = col.querySelector('.uld-stack-empty-hint');
-        if (hint) hint.remove();
-        var refItems = stackItems(stackEl);
-        var ref = insertAt == null ? refItems[0] : refItems[Math.max(0, Math.min(insertAt, refItems.length))];
-        ulds.forEach(function (uld) {
-            var item = makeStackItem(uld, sourceByUld[uld]);
-            col.insertBefore(item, ref || null);
-            setRowStackBadge(uld, displayNameForStack(stackEl) || stackName);
-        });
-        // Keep the stack open so the just-added ULD is visible immediately.
-        if (stackEl.dataset.stackId) {
-            forceStackekCollapsed = false;
-            expandedStackek.add(stackEl.dataset.stackId);
         }
-        refreshStackMeta(stackEl);
-        var displayName = displayNameForStack(stackEl) || stackName;
-        ulds.forEach(function (uld) { setRowStackBadge(uld, displayName); });
-        reconcileSelection();
-    }
-
-    function optimisticRemoveFromStackek(ulds) {
-        removeExistingStackItems(ulds);
-        ulds.forEach(clearRowStackBadge);
-        reconcileSelection();
+        toHide.forEach(function (el) {
+            if (el.classList.contains('uld-dedup-hidden')) return;
+            el.classList.add('uld-dedup-hidden');
+            el.style.display = 'none';
+            var s = el.closest('.uld-stack[data-stack-id]');
+            if (s && s !== el) touched.add(s);
+        });
+        touched.forEach(function (s) { if (s.isConnected && !isDedupHidden(s)) refreshStackMeta(s); });
     }
 
     function stackItemIn(stackEl, uld) {
@@ -3088,20 +3206,6 @@
         var at = insertAt == null ? 0 : Math.max(0, Math.min(insertAt, order.length));
         order.splice.apply(order, [at, 0].concat(movingUlds));
         return Array.from(new Set(order));
-    }
-
-    function applyStackOrderTopDown(stackEl, orderTopDown) {
-        var col = stackCol(stackEl);
-        if (!col) return;
-        var byUld = {};
-        stackItems(stackEl).forEach(function (el) {
-            byUld[el.dataset.uld] = el;
-        });
-        orderTopDown.forEach(function (uld) {
-            if (byUld[uld]) col.appendChild(byUld[uld]);
-        });
-        refreshStackMeta(stackEl);
-        reconcileSelection();
     }
 
     function bottomToTop(orderTopDown) {
@@ -3347,6 +3451,7 @@
         modal.style.display = 'none';
         modal.setAttribute('aria-hidden', 'true');
         setSettingsMessage('', '');
+        uldModalFocusOut(modal);
     }
 
     function populateSettings(data) {
@@ -3378,6 +3483,7 @@
         if (!modal) return;
         modal.style.display = 'flex';
         modal.setAttribute('aria-hidden', 'false');
+        uldModalFocusIn(modal, '#settings-ecomm-browse');
         setSettingsMessage('Beállítások betöltése...', '');
         fetch('/api/settings', { cache: 'no-store' })
             .then(function (r) { return r.json(); })
@@ -3490,6 +3596,56 @@
         return null;
     }
 
+    // Modal focus contract: on open move focus into the dialog (destructive
+    // dialogs focus "Mégse", others the first field), on close return it to
+    // the element that opened it. Tab is trapped inside the open dialog.
+    var UL_MODAL_FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), '
+        + 'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    function uldModalFocusables(modal) {
+        if (!modal) return [];
+        return Array.from(modal.querySelectorAll(UL_MODAL_FOCUSABLE)).filter(function (el) {
+            return el.offsetParent !== null || el === document.activeElement;
+        });
+    }
+    function uldModalFocusIn(modal, preferSelector) {
+        if (!modal) return;
+        var active = document.activeElement;
+        if (active && active !== document.body && !modal.contains(active)) modal._uldReturnFocus = active;
+        setTimeout(function () {
+            if (modal.getAttribute('aria-hidden') !== 'false') return;
+            if (modal.contains(document.activeElement)) return; // e.g. plate input already focused
+            var target = preferSelector ? modal.querySelector(preferSelector) : null;
+            if (!target) target = uldModalFocusables(modal)[0] || null;
+            try { if (target) target.focus(); } catch (err) {}
+        }, 40);
+    }
+    function uldModalFocusOut(modal) {
+        if (!modal) return;
+        var back = modal._uldReturnFocus;
+        modal._uldReturnFocus = null;
+        if (!back || !back.isConnected || typeof back.focus !== 'function') return;
+        if (document.activeElement && document.activeElement !== document.body
+            && !modal.contains(document.activeElement)) return; // focus already moved on
+        try { back.focus(); } catch (err) {}
+    }
+    function uldModalTrapTab(e, modal) {
+        var items = uldModalFocusables(modal);
+        if (!items.length) { e.preventDefault(); return; }
+        var first = items[0];
+        var last = items[items.length - 1];
+        var active = document.activeElement;
+        if (!modal.contains(active)) {
+            e.preventDefault();
+            (e.shiftKey ? last : first).focus();
+        } else if (e.shiftKey && active === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
+
     document.addEventListener('keydown', function (e) {
         // A modal open → Escape closes IT (not the selection underneath).
         if (e.key === 'Escape' && !uldTopOpenModal()) clearSelection();
@@ -3501,8 +3657,18 @@
         }
     }, true);
 
+    // ULD view hidden (inbound/outbound mode): observers only mark the work as
+    // pending; it runs once when the ULD view becomes active again.
+    function uldViewActive() {
+        return !!(document.body && document.body.classList.contains('flow-uld-mode'));
+    }
+    var _selectionReconcilePending = false;
+    var _optimisticCleanupPending = false;
+
     var _selectionReconcileTimer = null;
     function queueSelectionReconcile() {
+        if (!uldViewActive()) { _selectionReconcilePending = true; return; }
+        _selectionReconcilePending = false;
         if (_selectionReconcileTimer) clearTimeout(_selectionReconcileTimer);
         _selectionReconcileTimer = setTimeout(function () {
             // Apply prepared classes FIRST so the subsequent reconcile sees
@@ -3514,11 +3680,25 @@
         }, 80);
     }
 
-    var _selectionObserver = new MutationObserver(queueSelectionReconcile);
+    // Text-only records (countdown minutes, count-up digits) never change the
+    // stack/ULD structure; only element additions/removals schedule work.
+    function _hasElementMutation(records) {
+        for (var r = 0; r < records.length; r++) {
+            var rec = records[r], i;
+            for (i = 0; i < rec.addedNodes.length; i++) if (rec.addedNodes[i].nodeType === 1) return true;
+            for (i = 0; i < rec.removedNodes.length; i++) if (rec.removedNodes[i].nodeType === 1) return true;
+        }
+        return false;
+    }
+    var _selectionObserver = new MutationObserver(function (records) {
+        if (_hasElementMutation(records)) queueSelectionReconcile();
+    });
 
     // Debounced cleanup: avoids running on every single DOM mutation during a React re-render burst
     var _optimisticCleanupTimer = null;
-    var _optimisticObserver = new MutationObserver(function () {
+    function queueOptimisticCleanup() {
+        if (!uldViewActive()) { _optimisticCleanupPending = true; return; }
+        _optimisticCleanupPending = false;
         if (_optimisticCleanupTimer) clearTimeout(_optimisticCleanupTimer);
         _optimisticCleanupTimer = setTimeout(function () {
             cleanupOptimisticDuplicates();
@@ -3529,6 +3709,16 @@
             refreshTouchbarFades();
             applyDispatchedSelection();
         }, 80);
+    }
+    var _optimisticObserver = new MutationObserver(function (records) {
+        if (_hasElementMutation(records)) queueOptimisticCleanup();
+    });
+
+    // Flush deferred work when the body switches into the ULD view.
+    var _uldModeObserver = new MutationObserver(function () {
+        if (!uldViewActive()) return;
+        if (_optimisticCleanupPending) queueOptimisticCleanup();
+        if (_selectionReconcilePending) queueSelectionReconcile();
     });
 
     // Retry-based observer init: Dash scripts often load after DOMContentLoaded fires,
@@ -3567,8 +3757,13 @@
             return;
         }
         _initRetries = 0;
-        if (area) _selectionObserver.observe(area, { childList: true, subtree: true });
+        // Only the Dash-rendered list/grid containers: the selection bar and the
+        // toolbar buttons (also inside #uld-area) are written BY the reconcile,
+        // so observing them made the observer re-trigger itself.
+        if (grid) _selectionObserver.observe(grid, { childList: true, subtree: true });
+        if (list) _selectionObserver.observe(list, { childList: true, subtree: true });
         if (grid) _optimisticObserver.observe(grid, { childList: true, subtree: true });
+        if (document.body) _uldModeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
         if (list) _pageTransitionObserver.observe(list, { childList: true });
         initStickyOffset();
         reconcileSelection();
@@ -3742,6 +3937,17 @@
     document.addEventListener('dragover', function (e) {
         if (!dragState || !dragState.stackUlds.length) return;
         if (e.target.closest('.uld-stack[data-stack-id]')) return;
+        // Only the list panel is a "back to list" target. Gaps between
+        // stacks, stack headers or toolbars are no drop zone, so a slightly
+        // missed move no longer strips ULDs out of their stack.
+        var listPanel = e.target.closest('.uld-list-panel');
+        if (!listPanel) {
+            if (document.body.classList.contains('uld-return-target')) {
+                document.body.classList.remove('uld-return-target');
+                updateDropPreview();
+            }
+            return;
+        }
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         var now = performance.now();
@@ -3749,7 +3955,6 @@
         lastDragVisualAt = now;
         document.body.classList.add('uld-return-target');
         clearDropIndicators();
-        var listPanel = document.querySelector('.uld-list-panel') || document.body;
         updateDropPreview(listPanel, dragState.stackUlds.length, 'return');
     }, true);
 
@@ -3862,11 +4067,13 @@
     document.addEventListener('drop', function (e) {
         var overStack = e.target.closest('.uld-stack[data-stack-id]');
         if (overStack || !dragState || !dragState.stackUlds.length) return;
+        if (!e.target.closest('.uld-list-panel')) return;
         e.preventDefault();
         var ulds = dragState.stackUlds;
         var groupedByStack = itemsBySourceStack(ulds);
         var sourceIds = Object.keys(groupedByStack);
         var touchedStackList = stackElsFromIds(sourceIds);
+        var undoSnapshot = snapshotStackRemoval(groupedByStack);
         if (touchedStackList.some(stackLocked)) {
             _uldToast('Stack mentése folyamatban', 'info');
             clearDropIndicators();
@@ -3884,7 +4091,9 @@
         markMoving(ulds, 'uld-returning-list');
         uldApiCall(
             function () { return removeFromStackekPayload(groupedByStack, sourceIds); },
-            function () { _uldToast(ulds.length + ' ULD eltávolítva a stackből', 'ok'); },
+            function () {
+                _uldToast(ulds.length + ' ULD eltávolítva a stackből', 'ok', undoToastOpts(undoSnapshot));
+            },
             {
                 listDirty: true,
                 refreshDelay: 0,
@@ -3896,6 +4105,66 @@
         clearDropIndicators();
         setTimeout(clearDragClasses, 260);
     }, true);
+
+    // ── Undo for "removed from stack" ───────────────────────────────────────
+    // Snapshot each source stack's top-down order before the removal; undo
+    // re-adds the ULDs at their original index (add_from_list), and restores
+    // the exact order with reorder_stack when they were not contiguous.
+    function snapshotStackRemoval(groupedByStack) {
+        var snap = [];
+        Object.keys(groupedByStack || {}).forEach(function (id) {
+            var el = stackElById(id);
+            if (!el) return;
+            var order = stackOrderTopDown(el);
+            var moving = new Set(groupedByStack[id] || []);
+            var removed = order.filter(function (u) { return moving.has(u); });
+            if (!removed.length) return;
+            snap.push({
+                stackId: id,
+                name: el.dataset.stackName || 'stack',
+                order: order,
+                removed: removed
+            });
+        });
+        return snap;
+    }
+
+    function undoToastOpts(snapshot) {
+        if (!snapshot || !snapshot.length) return undefined;
+        return { action: { label: 'Visszavonás', run: function () { undoStackRemoval(snapshot); } } };
+    }
+
+    function undoStackRemoval(snapshot) {
+        snapshot.forEach(function (s) {
+            var firstIdx = s.order.indexOf(s.removed[0]);
+            var contiguous = s.removed.every(function (u, i) {
+                return s.order.indexOf(u) === firstIdx + i;
+            });
+            uldApiCall(
+                function () {
+                    return {
+                        action: 'add_from_list',
+                        uld_numbers: s.removed,
+                        stack_id: s.stackId,
+                        stack_revision: currentStackRevision(s.stackId),
+                        position: Math.max(0, firstIdx)
+                    };
+                },
+                function () {
+                    if (contiguous) {
+                        _uldToast('Visszaállítva: ' + s.name, 'ok');
+                        return;
+                    }
+                    uldApiCall(
+                        function () { return reorderStackPayload(s.stackId, s.order); },
+                        function () { _uldToast('Visszaállítva: ' + s.name, 'ok'); },
+                        { refreshDelay: 0, retryOnConflict: 2, retryTransient: 2 }
+                    );
+                },
+                { listDirty: true, refreshDelay: 0, retryOnConflict: 2, retryTransient: 2 }
+            );
+        });
+    }
 
     // ── ULD rename (double-click a stack item's number) ─────────────────────
 
@@ -3937,7 +4206,7 @@
             uldApiCall(
                 { action: 'rename_uld', uld_number: oldUld, new_uld_number: raw },
                 function () {
-                    _uldToast(oldUld + ' → ' + raw, 'ok');
+                    _uldToast(oldUld + ' átnevezve: ' + raw, 'ok');
                 },
                 {
                     listDirty: true,
@@ -3954,6 +4223,43 @@
         });
         input.addEventListener('click', function (ev) { ev.stopPropagation(); });
     }
+
+    // ── keyboard paths: ULD row, stack name (toggle / F2 rename), callout ───
+    // Mirrors the mouse actions: Enter = click/select, Space = toggle selection,
+    // F2 = rename. Only fires when the focused element itself is the target,
+    // so the buttons inside a row/header keep their native Enter.
+    document.addEventListener('keydown', function (e) {
+        if (e.altKey || e.defaultPrevented) return;
+        if (window.FMModal && window.FMModal.ownTopOpen && window.FMModal.ownTopOpen()) return;
+        if (uldTopOpenModal()) return;
+        var t = e.target;
+        if (!t || !t.matches) return;
+        var isActivate = e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar';
+        if (t.matches('.uld-row[data-uld]')) {
+            if (!isActivate) return;
+            e.preventDefault();
+            if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) selectOnly(t);
+            else toggleSelection(t);
+            return;
+        }
+        if (t.matches('.uld-stack-hdr .uld-stack-name')) {
+            if (e.key === 'F2') {
+                e.preventDefault();
+                t.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+                return;
+            }
+            if (!isActivate) return;
+            e.preventDefault();
+            var st = t.closest('.uld-stack[data-stack-id]');
+            if (st && st.classList.contains('uld-stack-collapsible')) toggleStackAccordion(st);
+            return;
+        }
+        if (t.matches('.uld-ss-dispatched-jump')) {
+            if (!isActivate) return;
+            e.preventDefault();
+            t.click();
+        }
+    });
 
     // ── stack rename (double-click) ─────────────────────────────────────────
 
@@ -3980,15 +4286,17 @@
         input.select();
 
         var committed = false;
-        function commit() {
+        function commit(refocus) {
             if (committed) return;
             committed = true;
             var newName = input.value.trim() || current;
-            var span = document.createElement('span');
-            span.className   = 'uld-stack-name';
-            span.textContent = newName;
-            span.title = 'Dupla kattintás az átnevezéshez';
-            input.replaceWith(span);
+            // Put the original (React-rendered) node back instead of a fresh span:
+            // it keeps its GHA class/style, role=button, tabindex and React identity.
+            nameEl.textContent = newName;
+            input.replaceWith(nameEl);
+            if (refocus === true) {
+                try { nameEl.focus(); } catch (err) {}
+            }
             if (newName !== current) {
                 var rollbackRevision = stackRevision(stack);
                 stack.dataset.stackName = newName;
@@ -4010,10 +4318,11 @@
             _uldToast('Átnevezve: ' + newName, 'info');
             }
         }
-        input.addEventListener('blur',  commit);
+        input.addEventListener('blur', function () { commit(false); });
         input.addEventListener('keydown', function (ev) {
-            if (ev.key === 'Enter')  { ev.preventDefault(); commit(); }
-            if (ev.key === 'Escape') { input.value = current; commit(); }
+            if (ev.key === 'Enter')  { ev.preventDefault(); commit(true); }
+            if (ev.key === 'Escape') { ev.preventDefault(); input.value = current; commit(true); }
+            ev.stopPropagation();
         });
     });
 
@@ -4452,7 +4761,7 @@
             if (!items.length) {
                 text.innerHTML =
                     '<div class="uld-delete-empty">' +
-                        '<span class="uld-delete-empty-icon">∅</span>' +
+                        '<span class="uld-delete-empty-icon"><span class="fi fi-empty" aria-hidden="true"></span></span>' +
                         '<span>Ez egy <b>üres stack</b>. Törlöd?</span>' +
                     '</div>';
             } else {
@@ -4485,6 +4794,8 @@
         modal.classList.remove('uld-delete-modal-closing');
         modal.classList.add('uld-delete-modal-show');
         modal.setAttribute('aria-hidden', 'false');
+        // Destructive dialog: default focus on "Mégse", never on "Törlés".
+        uldModalFocusIn(modal, '#uld-delete-cancel');
     }
 
     function closeTörlésModal() {
@@ -4493,6 +4804,7 @@
             // Play the exit animation, then fully hide.
             modal.classList.add('uld-delete-modal-closing');
             modal.setAttribute('aria-hidden', 'true');
+            uldModalFocusOut(modal);
             setTimeout(function () {
                 modal.classList.remove('uld-delete-modal-show', 'uld-delete-modal-closing');
             }, 200);
@@ -4586,7 +4898,7 @@
             if (!items.length) {
                 text.innerHTML =
                     '<div class="uld-delete-empty">' +
-                        '<span class="uld-delete-empty-icon">⇥</span>' +
+                        '<span class="uld-delete-empty-icon"><span class="fi fi-dispatch" aria-hidden="true"></span></span>' +
                         '<span>Ez egy <b>üres stack</b>, ezért nem adható ki.</span>' +
                     '</div>';
             } else {
@@ -4639,6 +4951,8 @@
         modal.classList.remove('uld-delete-modal-closing');
         modal.classList.add('uld-delete-modal-show');
         modal.setAttribute('aria-hidden', 'false');
+        // First field is the plate input (focused above); fallback "Mégse".
+        uldModalFocusIn(modal, plateInput ? '#uld-dispatch-plate' : '#uld-dispatch-cancel');
     }
 
     function closeKiadásModal() {
@@ -4646,6 +4960,7 @@
         if (modal) {
             modal.classList.add('uld-delete-modal-closing');
             modal.setAttribute('aria-hidden', 'true');
+            uldModalFocusOut(modal);
             setTimeout(function () {
                 modal.classList.remove('uld-delete-modal-show', 'uld-delete-modal-closing');
             }, 200);
@@ -4687,11 +5002,12 @@
                 '<div class="uld-info-field"><span>Stack</span><strong>' + _esc(itemEl.dataset.stackName || '—') + '</strong></div>' +
                 '<div class="uld-info-field"><span>GHA</span><strong>' + _esc(itemEl.dataset.stackGha || '—') + '</strong></div>' +
                 '<div class="uld-info-field"><span>Kiadás ideje</span><strong>' + _esc(fmtDetailDate(itemEl.dataset.dispatchedAt || '')) + '</strong></div>' +
-                '<div class="uld-info-field"><span>Rendszám</span><strong>' + _esc(itemEl.dataset.dispatchRendszám || '—') + '</strong></div>' +
+                '<div class="uld-info-field"><span>Rendszám</span><strong>' + _esc(itemEl.dataset.dispatchPlate || '—') + '</strong></div>' +
             '</div>';
         modal.classList.remove('uld-delete-modal-closing');
         modal.classList.add('uld-delete-modal-show');
         modal.setAttribute('aria-hidden', 'false');
+        uldModalFocusIn(modal, '#uld-info-close');
     }
 
     function closeUldInfoModal() {
@@ -4699,6 +5015,7 @@
         if (!modal) return;
         modal.classList.add('uld-delete-modal-closing');
         modal.setAttribute('aria-hidden', 'true');
+        uldModalFocusOut(modal);
         setTimeout(function () {
             modal.classList.remove('uld-delete-modal-show', 'uld-delete-modal-closing');
         }, 200);
@@ -4707,8 +5024,8 @@
     function updateTouchbarFade(bar) {
         if (!bar) return;
         var max = Math.max(0, bar.scrollWidth - bar.clientWidth - 1);
-        var left = bar.scrollHátra > 1;
-        var right = bar.scrollHátra < max;
+        var left = bar.scrollLeft > 1;
+        var right = bar.scrollLeft < max;
         bar.classList.toggle('uld-touch-has-left', left);
         bar.classList.toggle('uld-touch-has-right', right);
     }
@@ -4725,7 +5042,7 @@
             var match = bar.querySelector('.uld-dlist-touch-item-match');
             if (!match) return;
             try {
-                bar.scrollHátra = Math.max(0, match.offsetHátra - (bar.clientWidth - match.offsetWidth) / 2);
+                bar.scrollLeft = Math.max(0, match.offsetLeft - (bar.clientWidth - match.offsetWidth) / 2);
             } catch (e) {}
         });
     }
@@ -4742,21 +5059,21 @@
             if (!present.has(id)) dispatchedSelected.delete(id);
         });
         rows.forEach(function (r) {
-            r.classList.toggle('uld-dlist-row-selected', dispatchedSelected.has(r.dataset.stackId));
+            toggleClassIfChanged(r, 'uld-dlist-row-selected', dispatchedSelected.has(r.dataset.stackId));
         });
         var count = dispatchedSelected.size;
         var label = document.querySelector('.uld-dlist-selcount');
         if (label) {
-            label.textContent = count + ' selected';
-            label.dataset.count = String(count);
-            label.classList.toggle('uld-dlist-selcount-active', count > 0);
+            setTextIfChanged(label, count + ' kijelölve');
+            setAttrIfChanged(label, 'data-count', String(count));
+            toggleClassIfChanged(label, 'uld-dlist-selcount-active', count > 0);
         }
         var revSel = document.querySelector('.uld-dlist-revert-selected');
-        if (revSel) revSel.disabled = count === 0;
+        if (revSel && revSel.disabled !== (count === 0)) revSel.disabled = count === 0;
         var selMind = document.querySelector('.uld-dlist-select-all');
         if (selMind) {
             var allSelected = rows.length > 0 && count === rows.length;
-            selMind.textContent = allSelected ? 'Kijelölés törlése' : 'Mind kijelölése';
+            setTextIfChanged(selMind, allSelected ? 'Kijelölés törlése' : 'Mind kijelölése');
         }
         // Reset any armed bulk buttons when the selection changes.
         if (!count) disarmDispatchedBulk('.uld-dlist-revert-selected', 'Kijelöltek vissza');
@@ -4770,8 +5087,8 @@
     function disarmDispatchedBulk(selector, label) {
         var btn = document.querySelector(selector);
         if (!btn) return;
-        btn.classList.remove('uld-dlist-revert-armed');
-        if (label) btn.textContent = label;
+        toggleClassIfChanged(btn, 'uld-dlist-revert-armed', false);
+        if (label) setTextIfChanged(btn, label);
         clearTimeout(btn._disarm);
     }
     // Revert a list of dispatched stack ids (undispatch) — staggered, with the row
@@ -4894,7 +5211,7 @@
         var viewSwitchBtn = e.target.closest('#uld-view-active-btn, #uld-view-dispatched-btn');
         if (viewSwitchBtn) {
             dispatchedSelected.clear();
-            setTimeout(updateDispatchedSelectionUi, 0);
+            setTimeout(applyDispatchedSelection, 0);
         }
         // Active-view search → "found in dispatched stacks" callout: jump to the
         // dispatched view. The search store is shared, so the term is kept and the
@@ -5363,7 +5680,21 @@
                 return;
             }
             var willPrepare = !nowPrepared;
-            var domSnapshot = captureUldDom();
+            // Rollback state: only the classes/attributes the optimistic toggle
+            // touches. Never snapshot/restore innerHTML — the grid and list are
+            // React-owned (see uld_stacks_optimistic_dom).
+            var prevPrep = {
+                stackPrepared: stackElP.classList.contains('uld-stack-prepared'),
+                stackDataset: stackElP.dataset.prepared,
+                btnClass: prepBtn.className,
+                btnTitle: prepBtn.title,
+                btnIdle: prepBtn.dataset.uldIdleLabel,
+                rows: []
+            };
+            stackElP.querySelectorAll('.uld-si[data-uld]').forEach(function (si) {
+                var r = rowForUld(si.dataset.uld);
+                if (r) prevPrep.rows.push({ row: r, cls: r.classList.contains('uld-row-prepared'), ds: r.dataset.prepared });
+            });
             // Optimistic visual toggle — class + label + dataset
             stackElP.classList.toggle('uld-stack-prepared', willPrepare);
             stackElP.dataset.prepared = willPrepare ? '1' : '0';
@@ -5394,7 +5725,23 @@
                 function () { _uldToast(willPrepare ? 'Stack készre jelölve' : 'Kész jelölés törölve', 'ok'); },
                 {
                     refreshDelay: 120,
-                    rollback: function () { restoreUldDom(domSnapshot); },
+                    rollback: function () {
+                        stackElP.classList.toggle('uld-stack-prepared', prevPrep.stackPrepared);
+                        if (prevPrep.stackDataset == null) delete stackElP.dataset.prepared;
+                        else stackElP.dataset.prepared = prevPrep.stackDataset;
+                        prepBtn.className = prevPrep.btnClass;
+                        prepBtn.title = prevPrep.btnTitle;
+                        // releaseActionButton (done) restores the label from this.
+                        if (prevPrep.btnIdle != null) prepBtn.dataset.uldIdleLabel = prevPrep.btnIdle;
+                        prevPrep.rows.forEach(function (p) {
+                            p.row.classList.toggle('uld-row-prepared', p.cls);
+                            if (p.ds == null) delete p.row.dataset.prepared;
+                            else p.row.dataset.prepared = p.ds;
+                        });
+                        // uldApiCall calls bumpTrigger() after the rollback, so the
+                        // authoritative server state re-renders right after.
+                        reconcileSelection();
+                    },
                     done: function () { releaseActionButton(prepBtn); }
                 }
             );
@@ -5441,8 +5788,11 @@
                 selectedUlds.delete(uldNum);
                 reconcileSelection();
                 var parentStackId = stackIdOf(parentStack);
+                var oneGrouped = {};
+                if (parentStackId) oneGrouped[parentStackId] = [uldNum];
+                var oneUndo = snapshotStackRemoval(oneGrouped);
                 uldApiCall(function () { return removeOneFromStackPayload(parentStackId, uldNum); }, function () {
-                    _uldToast(uldNum + ' eltávolítva a stackből', 'ok');
+                    _uldToast(uldNum + ' eltávolítva a stackből', 'ok', undoToastOpts(oneUndo));
                 }, {
                     listDirty: true,
                     refreshDelay: 0,
@@ -5491,7 +5841,7 @@
             return;
         }
         // Szűrők törlése
-        if (e.target.closest('.uld-reset-btn')) {
+        if (e.target.closest('.uld-reset-btn, [data-uld-action="reset-filters"]')) {
             clearSelection();
             setStore('uld-filter-store', 'all');
             setStore('uld-prefix-filter-store', '');
@@ -5568,9 +5918,12 @@
     }, true);
     document.addEventListener('keydown', function (e) {
         // Unified modal keyboard contract: Escape closes the topmost open modal,
-        // Enter triggers its primary action (add / confirm / dispatch). Works no
-        // matter where focus is, so it applies to the kézi ULD add, dispatch
-        // confirmation, delete confirmation, etc.
+        // Enter triggers its primary action (add / confirm / dispatch) from a
+        // field or the dialog body. Enter on a focused button / link / select
+        // keeps its native meaning, so Tab to "Mégse" + Enter cancels instead of
+        // confirming the delete/dispatch. Tab is trapped inside the dialog.
+        // PIN / Developer / Összegzés above settings: modal_a11y.js owns the keys.
+        if (window.FMModal && window.FMModal.ownTopOpen && window.FMModal.ownTopOpen()) return;
         var openModal = uldTopOpenModal();
         if (openModal) {
             if (e.key === 'Escape') {
@@ -5579,9 +5932,24 @@
                 openModal.close();
                 return;
             }
+            if (e.key === 'Tab') {
+                var modalEl = document.getElementById(openModal.id);
+                if (modalEl) uldModalTrapTab(e, modalEl);
+                return;
+            }
             if (e.key === 'Enter') {
+                var tgt = e.target;
+                var tag = tgt && tgt.tagName;
                 // Don't hijack Enter inside a real multiline textarea (newline).
-                if (e.target && e.target.tagName === 'TEXTAREA') return;
+                if (tag === 'TEXTAREA') return;
+                // Focused control INSIDE the dialog: let the native activation
+                // run (the confirm button's own click handler confirms; "Mégse"
+                // cancels). Focus still on the opener behind the dialog (e.g.
+                // settings, edit) must not re-click it: confirm as before.
+                var openEl = document.getElementById(openModal.id);
+                if (openEl && tgt && openEl.contains(tgt)
+                    && (tag === 'BUTTON' || tag === 'A' || tag === 'SELECT'
+                        || (tgt.getAttribute && tgt.getAttribute('role') === 'button'))) return;
                 if (openModal.confirm) {
                     e.preventDefault();
                     e.stopPropagation();

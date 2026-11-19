@@ -31,7 +31,9 @@ Ikon-rendszer (NINCS emoji sehol — user szabály):
   GLABS/sofőr) ikonjai KISZEDVE — túl zsúfolt volt.
 - `badge-aged`: csak óra-ikon (nincs szöveg!), hogy SOHA ne növelje a header magasságát;
   `.priority-card .card-strip { min-height: 38px }` garantálja az egységes fejlécmagasságot.
-- A meglévő dingbat/glyph gombok (`⚙ 🖨 ✓ ✕ ✎ ⚠`) szándékosan maradtak (user döntés).
+- 2026-11-19 user döntés: dingbat/glyph sincs (`⚙ 🖨 ✓ ✕ × ⚠ ⇄`, „X” betű bezárógomb).
+  Minden ikon `_fi("<név>")` / `<span class="fi fi-<név>">` maszk, ikon-only gombon
+  `aria-label`. Ellenőrzés: látható szövegcsomópontban nincs U+2190–27BF / U+1F300+ / ×.
 
 Extrás glass (clean, de prémium — CSS-only, renderer-biztos, STATIKUS):
 

@@ -16,7 +16,6 @@ if __name__ == "__main__" and "--flow-manager-cleanup-helper" in sys.argv:
 import ctypes
 import ctypes.wintypes
 import hashlib
-import html as _html
 import json
 import logging
 import multiprocessing
@@ -104,7 +103,6 @@ else:
 
 _VENDOR_CSS      = os.path.join(_assets_path, "vendor", "bootstrap-cyborg.min.css")
 _VENDOR_FONT     = os.path.join(_assets_path, "vendor", "inter-font.css")
-_VENDOR_JSBARCODE = os.path.join(_assets_path, "jsbarcode.min.js")
 
 
 def _ensure_vendor_assets():
@@ -131,25 +129,16 @@ def _ensure_vendor_assets():
 
     # Bootstrap Cyborg
     if not os.path.exists(_VENDOR_CSS):
-        print("[1/3] Bootstrap Cyborg CSS letöltése...", flush=True)
+        print("[1/2] Bootstrap Cyborg CSS letöltése...", flush=True)
         _dl(
             "https://cdn.jsdelivr.net/npm/bootswatch@5.3.3/dist/cyborg/bootstrap.min.css",
             _VENDOR_CSS,
             "bootstrap-cyborg.min.css",
         )
 
-    # JsBarcode (placed directly in assets/ so Dash auto-loads it before print_preview.js)
-    if not os.path.exists(_VENDOR_JSBARCODE):
-        print("[2/3] JsBarcode letöltése...", flush=True)
-        _dl(
-            "https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js",
-            _VENDOR_JSBARCODE,
-            "jsbarcode.min.js",
-        )
-
     # Inter font
     if not os.path.exists(_VENDOR_FONT):
-        print("[3/3] Inter betűtípus letöltése...", flush=True)
+        print("[2/2] Inter betűtípus letöltése...", flush=True)
         INTER_URL = (
             "https://fonts.googleapis.com/css2"
             "?family=Inter:wght@300;400;500;600;700;800;900&display=swap"
@@ -207,6 +196,13 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 server = app.server
+
+
+def _fi(name: str, extra: str = ""):
+    """Inline SVG mask icon (style.css .fi / --icon-*); decorative, aria-hidden."""
+    cls = f"fi fi-{name}" + (f" {extra}" if extra else "")
+    return html.Span(className=cls, **{"aria-hidden": "true"})
+
 
 from http_performance import install_http_performance
 install_http_performance(server)
@@ -516,10 +512,84 @@ def _tv_fixed_loading_candidate(
     }
 
 
+# Utolso sikeresen felepitett /api/tv/ops payload (keep-last-good). Ha a payload
+# felepitese kivetelt dob, ezt adjuk vissza freshness.stalled=True jelzessel, hogy
+# a TV a stale-bannert mutassa ahelyett, hogy nemán befagyna egy 500-as valaszon.
+_TV_OPS_LAST_GOOD: dict = {}
+
+
 @server.route("/api/tv/ops", methods=["GET"])
 def api_tv_ops():
-    """Live operational summary for TV mode slide 1 & 2."""
+    """Live operational summary for TV mode slide 1 & 2 (keep-last-good wrapper)."""
     from flask import jsonify
+    try:
+        payload = _cached_tv_ops_payload()
+    except Exception:
+        logging.exception("api_tv_ops: payload build failed")
+        last = _TV_OPS_LAST_GOOD.get("payload")
+        if last is None:
+            return jsonify({
+                "status": "error",
+                "error": "tv_ops_failed",
+                "freshness": {"stalled": True, "reason": "api_error",
+                              "last_success": None, "age_seconds": None},
+            }), 503
+        fallback = dict(last)
+        fresh = dict(fallback.get("freshness") or {})
+        age = None
+        try:
+            if fresh.get("last_success"):
+                age = round((datetime.now() - datetime.fromisoformat(fresh["last_success"])).total_seconds(), 1)
+        except Exception:
+            age = None
+        fresh.update({"stalled": True, "reason": "api_error", "age_seconds": age})
+        fallback["freshness"] = fresh
+        return jsonify(fallback)
+    _TV_OPS_LAST_GOOD["payload"] = payload
+    return jsonify(payload)
+
+
+# Rövid életű payload-cache: a TV (több kijelző is) sűrűn kérdez, a payload csak
+# data_version-váltáskor változik. A freshness blokk mindig friss (age_seconds
+# és a stall-jel a data_version emelése nélkül is változik).
+_TV_OPS_CACHE: dict = {"version": None, "at": 0.0, "payload": None}
+_TV_OPS_CACHE_TTL_S = 10.0
+_TV_OPS_DF_COLUMNS = (
+    "is_stored", "is_en_route", "priority_rank", "awb", "lmp", "weight",
+    "waiting_hours", "is_aged", "driver_checkin", "driver_in_rest",
+    "glabs_shippable", "glabs_total", "cargo_type",
+)
+
+
+def _tv_ops_freshness(state: dict) -> dict:
+    last_ok = state.get("last_success_refresh")
+    return {
+        "stalled":      bool(state.get("read_stalled")),
+        "reason":       state.get("read_stall_reason") or "",
+        "last_success": last_ok.isoformat() if last_ok else None,
+        "age_seconds":  round((datetime.now() - last_ok).total_seconds(), 1) if last_ok else None,
+    }
+
+
+def _cached_tv_ops_payload() -> dict:
+    """/api/tv/ops payload, rebuilt only on a data_version change or after the TTL."""
+    version = data_cache.get_state().get("data_version")
+    if version is None:
+        return _build_tv_ops_payload()
+    now = time.monotonic()
+    cached = _TV_OPS_CACHE.get("payload")
+    if (cached is not None and _TV_OPS_CACHE.get("version") == version
+            and now - float(_TV_OPS_CACHE.get("at") or 0.0) < _TV_OPS_CACHE_TTL_S):
+        payload = dict(cached)
+        payload["freshness"] = _tv_ops_freshness(data_cache.get_state())
+        return payload
+    payload = _build_tv_ops_payload()
+    _TV_OPS_CACHE.update({"version": version, "at": now, "payload": payload})
+    return payload
+
+
+def _build_tv_ops_payload() -> dict:
+    """Builds the /api/tv/ops payload dict (raises on bad state; see api_tv_ops)."""
     import math
     state = data_cache.get_state()
     df    = state.get("df")
@@ -530,7 +600,9 @@ def api_tv_ops():
     active_items: list[dict] = []
     stored_today = 0
     if df is not None and not df.empty:
-        view = df.copy()
+        # Csak a felhasznált oszlopok: a teljes df.copy() minden kérésnél
+        # a ~100 oszlopos táblát másolta.
+        view = df[[c for c in _TV_OPS_DF_COLUMNS if c in df.columns]]
         if "is_stored" in view.columns:
             stored_today = int((view["is_stored"] == True).sum())
             view = view[view["is_stored"] != True]
@@ -801,19 +873,13 @@ def api_tv_ops():
     bec_megerkezett_cnt = int(kpi.get("bec_megerkezett_count", 0) or 0)
     bec_szemles_cnt     = int(kpi.get("bec_szemles_count", 0) or 0)
 
-    _last_ok = state.get("last_success_refresh")
-    return jsonify({
+    return {
         "status":               state.get("status", "loading"),
         "last_refresh":         state.get("last_refresh").isoformat() if state.get("last_refresh") else None,
         # Freshness / sync-stall signal for the TV (24/7): when the background read
         # is stuck or hard-failing, the payload below is the last GOOD snapshot and
         # the TV shows a visible "adat X perce · szinkron elakadt" warning.
-        "freshness": {
-            "stalled":      bool(state.get("read_stalled")),
-            "reason":       state.get("read_stall_reason") or "",
-            "last_success": _last_ok.isoformat() if _last_ok else None,
-            "age_seconds":  round((datetime.now() - _last_ok).total_seconds(), 1) if _last_ok else None,
-        },
+        "freshness":            _tv_ops_freshness(state),
         "active_items":         active_items,
         "total_active":         total_active,
         "stored_today":         stored_today,
@@ -846,7 +912,7 @@ def api_tv_ops():
         "outbound_shift_hourly": kpi.get("outbound_at_shift_hourly") or kpi.get("outbound_shift_hourly") or [],
         # Műszak riport oldal (TV) — outbound-vezérelt összegzés + ráták.
         "report":               report,
-    })
+    }
 
 
 @server.after_request
@@ -867,176 +933,6 @@ def _asset_cache_headers(response):
         response.headers.pop("Pragma", None)
         response.headers.pop("Expires", None)
     return response
-
-
-# ---------------------------------------------------------------------------
-# Nyomtatás route — standalone print-ready HTML for a GLABS loading plan
-# ---------------------------------------------------------------------------
-
-def _generate_print_html(plate: str, glabs_id: str, ramp: str, glabs: dict) -> str:
-    now_str = datetime.now().strftime("%Y.%m.%d %H:%M")
-    awb_items = glabs.get("awb_items", [])
-    plate_e   = _html.escape(str(plate))
-    glabs_id_e = _html.escape(str(glabs_id))
-    ramp_e    = _html.escape(str(ramp or "—"))
-
-    total_colli = 0
-    total_plt = 0
-    rows_html = ""
-    for i, item in enumerate(awb_items, 1):
-        awb      = _html.escape(str(item.get("awb") or "—"))
-        lmp      = _html.escape(str(item.get("lmp") or "—"))
-        colli_v  = item.get("boxes") or 0
-        plt_v    = item.get("pallets_issued") or 0
-        location = _html.escape(str(item.get("location") or ""))
-        note     = _html.escape(str(item.get("load_note") or ""))
-        total_colli += float(colli_v)
-        total_plt   += float(plt_v)
-        colli_disp = str(int(colli_v)) if colli_v else "—"
-        plt_disp   = str(int(plt_v))   if plt_v   else "—"
-        row_cls = "issued" if item.get("is_issued") else "ready" if item.get("is_ready") else ""
-        rows_html += (
-            f'<tr class="{row_cls}">'
-            f'<td class="td-num">{i}</td>'
-            f'<td class="td-lmp">{lmp}</td>'
-            f'<td class="td-awb">{awb}</td>'
-            f'<td class="td-plate">{plate_e}</td>'
-            f'<td class="td-num">{colli_disp}</td>'
-            f'<td class="td-num">{plt_disp}</td>'
-            f'<td class="td-korr"></td>'
-            f'<td class="td-loc">{location}</td>'
-            f'<td class="td-note">{note}</td>'
-            f'</tr>\n'
-        )
-
-    total_colli_disp = str(int(total_colli)) if total_colli else "—"
-    total_plt_disp   = str(int(total_plt))   if total_plt   else "—"
-    row_count = len(awb_items)
-
-    return f"""<!DOCTYPE html>
-<html lang="hu">
-<head>
-<meta charset="utf-8">
-<title>Loading Plan – {glabs_id_e}</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #1a1a1a; background: #fff; }}
-  .page {{ padding: 14mm 12mm 10mm; max-width: 297mm; margin: 0 auto; }}
-  .doc-header {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #1a1a1a; padding-bottom: 6px; margin-bottom: 12px; }}
-  .doc-company {{ font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }}
-  .doc-title {{ font-size: 20px; font-weight: 700; letter-spacing: 1px; color: #1a1a1a; }}
-  .meta-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }}
-  .meta-box {{ border: 1px solid #ccc; padding: 5px 8px; border-radius: 3px; }}
-  .meta-label {{ font-size: 8px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; display: block; }}
-  .meta-value {{ font-size: 13px; font-weight: 700; display: block; margin-top: 2px; }}
-  .meta-value.ramp {{ color: #c0392b; }}
-  table {{ width: 100%; border-collapse: collapse; margin-bottom: 14px; }}
-  th {{ background: #2c3e50; color: #fff; padding: 5px 6px; text-align: left; font-size: 9px; letter-spacing: 0.4px; text-transform: uppercase; border: 1px solid #2c3e50; }}
-  td {{ padding: 5px 6px; border: 1px solid #d0d0d0; font-size: 10px; vertical-align: middle; }}
-  tr:nth-child(even) td {{ background: #f8f8f8; }}
-  tr.ready td {{ background: #eafaf1; }}
-  tr.issued td {{ background: #f5f5f5; color: #999; }}
-  .td-num {{ text-align: center; width: 32px; }}
-  .td-lmp {{ font-weight: 600; min-width: 80px; }}
-  .td-awb {{ font-family: monospace; font-size: 9.5px; min-width: 100px; }}
-  .td-plate {{ font-weight: 600; min-width: 70px; }}
-  .td-korr {{ min-width: 48px; border-bottom: 1.5px solid #888 !important; background: #fffde7 !important; }}
-  .td-loc {{ min-width: 60px; color: #444; }}
-  .td-note {{ color: #555; }}
-  tfoot td {{ font-weight: 700; background: #eef2ff !important; border-top: 2px solid #2c3e50; font-size: 11px; }}
-  tfoot .td-num {{ font-size: 13px; color: #2c3e50; }}
-  .summary-label {{ text-align: right; font-size: 10px; letter-spacing: 0.3px; }}
-  .signatures {{ display: flex; gap: 20px; margin-top: 20px; }}
-  .sig-block {{ flex: 1; border-top: 1px solid #888; padding-top: 4px; }}
-  .sig-label {{ font-size: 9px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; }}
-  .doc-footer {{ margin-top: 14px; font-size: 8px; color: #aaa; text-align: right; border-top: 1px solid #eee; padding-top: 4px; }}
-  .print-btn-bar {{ text-align: right; margin-bottom: 12px; }}
-  .print-btn {{ background: #2c3e50; color: #fff; border: none; padding: 7px 18px; font-size: 12px; border-radius: 4px; cursor: pointer; letter-spacing: 0.5px; }}
-  .print-btn:hover {{ background: #34495e; }}
-  @media print {{
-    .print-btn-bar {{ display: none; }}
-    .page {{ padding: 6mm 8mm; }}
-    tr {{ page-break-inside: avoid; }}
-  }}
-</style>
-</head>
-<body>
-<div class="page">
-  <div class="print-btn-bar">
-    <button class="print-btn" onclick="window.print()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>Nyomtatás</button>
-  </div>
-  <div class="doc-header">
-    <div>
-      <div class="doc-company">HGL Group Hungary &middot; Ecommerce Operations</div>
-    </div>
-    <div class="doc-title">LOADING PLAN</div>
-  </div>
-  <div class="meta-grid">
-    <div class="meta-box"><span class="meta-label">GLABS ID</span><span class="meta-value">{glabs_id_e}</span></div>
-    <div class="meta-box"><span class="meta-label">Rendszám</span><span class="meta-value">{plate_e}</span></div>
-    <div class="meta-box"><span class="meta-label">RAMP</span><span class="meta-value ramp">{ramp_e}</span></div>
-    <div class="meta-box"><span class="meta-label">Dátum</span><span class="meta-value">{now_str}</span></div>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th class="td-num">#</th>
-        <th>LMP</th>
-        <th>AWB</th>
-        <th>Rendszám</th>
-        <th class="td-num">Colli</th>
-        <th class="td-num">PLT</th>
-        <th>Korr.</th>
-        <th>Tárhely</th>
-        <th>Megjegyzés</th>
-      </tr>
-    </thead>
-    <tbody>
-{rows_html}    </tbody>
-    <tfoot>
-      <tr>
-        <td colspan="4" class="summary-label">ÖSSZESEN &nbsp; ({row_count} tétel)</td>
-        <td class="td-num">{total_colli_disp}</td>
-        <td class="td-num">{total_plt_disp}</td>
-        <td></td><td></td><td></td>
-      </tr>
-    </tfoot>
-  </table>
-  <div class="signatures">
-    <div class="sig-block"><div class="sig-label">Kiadta</div></div>
-    <div class="sig-block"><div class="sig-label">Átvette</div></div>
-    <div class="sig-block"><div class="sig-label">Ellenőrizte</div></div>
-  </div>
-  <div class="doc-footer">Nyomtatva: {now_str}</div>
-</div>
-</body>
-</html>"""
-
-
-@server.route("/print/glabs")
-def print_glabs_route():
-    plate    = request.args.get("plate", "").strip()
-    glabs_id = request.args.get("glabs_id", "").strip()
-    ramp     = request.args.get("ramp", "").strip()
-
-    state = data_cache.get_state()
-    cards = state.get("outbound_cards") or []
-
-    card = next(
-        (c for c in cards if (_clean_text(c.get("plate")) or "") == plate),
-        None,
-    )
-    if card is None:
-        return f"<p>Rakodás nem található: {plate}</p>", 404
-
-    glabs = next(
-        (g for g in card.get("glabs_items", []) if (_clean_text(g.get("glabs_id")) or "") == glabs_id),
-        None,
-    )
-    if glabs is None:
-        return f"<p>GLABS nem található: {glabs_id}</p>", 404
-
-    return _generate_print_html(plate, glabs_id, ramp, glabs)
 
 
 # ---------------------------------------------------------------------------
@@ -2552,7 +2448,8 @@ def _kpi_static_layout():
         # Wrapper anchors the floating hourly-chart panel; the panel must live
         # OUTSIDE .kpi-card (overflow:hidden) so it isn't clipped — mirrors kpi-bec.
         html.Div(id="kpi-muszak-wrapper", className="kpi-muszak-wrapper", children=[
-            html.Div(id="kpi-muszak-card", className="kpi-card kpi-muszak", n_clicks=0, children=[
+            html.Div(id="kpi-muszak-card", className="kpi-card kpi-muszak", n_clicks=0,
+                     tabIndex=0, children=[
                 _glass_fx("l1"),
                 html.Div(className="kpi-card-tools kpi-shift-tools", children=[
                     html.Div(className="kpi-mode-toggle", children=[
@@ -2561,7 +2458,7 @@ def _kpi_static_layout():
                         html.Button("OUT", id="kpi-mode-outbound", className="kpi-mode-btn",
                                     n_clicks=0, title="Outbound műszak"),
                     ]),
-                    html.Button("⧉", id="kpi-muszak-copy", className="kpi-copy-btn",
+                    html.Button(_fi("copy"), id="kpi-muszak-copy", className="kpi-copy-btn",
                                 n_clicks=0, title="Műszak KPI másolása",
                                 **{"aria-label": "Műszak KPI másolása",
                                    "data-copy-text": ""}),
@@ -2571,7 +2468,7 @@ def _kpi_static_layout():
                 html.Div(className="kpi-bec-summary", children=[
                     html.Div(id="kpi-muszak-label", className="kpi-label", children="Műszak"),
                     html.Div(id="kpi-muszak-value", className="kpi-value kpi-countup", children="–"),
-                    html.Span("▾", className="kpi-expand-arrow"),
+                    html.Span(_fi("chev-down"), className="kpi-expand-arrow"),
                 ]),
                 # Kept (hidden) only so the existing kpi-muszak-sub callback Output
                 # still has a target; the range is shown in the panel header instead.
@@ -2581,10 +2478,10 @@ def _kpi_static_layout():
             # Shift step arrows — children of the WRAPPER (not the card) so they
             # overlay the card edges without ever affecting the card's height.
             # Synced with the panel arrows via the shared .kpi-shift-nav class.
-            html.Button("‹", className="kpi-shift-nav kpi-shift-nav-card kpi-shift-prev",
+            html.Button(_fi("chev-left"), className="kpi-shift-nav kpi-shift-nav-card kpi-shift-prev",
                         **{"data-shift-dir": "prev", "aria-label": "Előző műszak",
                            "title": "Előző műszak"}),
-            html.Button("›", className="kpi-shift-nav kpi-shift-nav-card kpi-shift-next is-hidden",
+            html.Button(_fi("chev-right"), className="kpi-shift-nav kpi-shift-nav-card kpi-shift-next is-hidden",
                         **{"data-shift-dir": "next", "aria-label": "Aktuális műszak",
                            "title": "Aktuális műszak"}),
             # Floating panel — sibling of the card, hosts the óránkénti kg chart.
@@ -2593,11 +2490,11 @@ def _kpi_static_layout():
                 html.Div(className="kpi-muszak-panel-inner", children=[
                     _glass_fx("l1"),
                     html.Div(className="kpi-hourly-head", children=[
-                        html.Button("‹", className="kpi-shift-nav kpi-shift-nav-panel kpi-shift-prev",
+                        html.Button(_fi("chev-left"), className="kpi-shift-nav kpi-shift-nav-panel kpi-shift-prev",
                                     **{"data-shift-dir": "prev", "title": "Előző műszak",
                                        "aria-label": "Előző műszak"}),
                         html.Span(id="kpi-hourly-title", className="kpi-hourly-title", children="Óránkénti kg"),
-                        html.Button("›", className="kpi-shift-nav kpi-shift-nav-panel kpi-shift-next is-hidden",
+                        html.Button(_fi("chev-right"), className="kpi-shift-nav kpi-shift-nav-panel kpi-shift-next is-hidden",
                                     **{"data-shift-dir": "next", "title": "Aktuális műszak",
                                        "aria-label": "Aktuális műszak"}),
                     ]),
@@ -2608,10 +2505,11 @@ def _kpi_static_layout():
         # Wrapper provides the relative positioning anchor for the floating panel.
         # The panel must be OUTSIDE .kpi-card (which has overflow:hidden) so it isn't clipped.
         html.Div(id="kpi-bec-wrapper", className="kpi-bec-wrapper", children=[
-            html.Div(id="kpi-bec-card", className="kpi-card kpi-bec", n_clicks=0, children=[
+            html.Div(id="kpi-bec-card", className="kpi-card kpi-bec", n_clicks=0,
+                     tabIndex=0, children=[
                 _glass_fx("l1"),
                 html.Div(className="kpi-card-tools", children=[
-                    html.Button("⧉", id="kpi-bec-copy", className="kpi-copy-btn",
+                    html.Button(_fi("copy"), id="kpi-bec-copy", className="kpi-copy-btn",
                                 n_clicks=0, title="Várható beérkezők másolása",
                                 **{"aria-label": "Várható beérkezők másolása",
                                    "data-copy-text": ""}),
@@ -2619,7 +2517,7 @@ def _kpi_static_layout():
                 html.Div(className="kpi-bec-summary", children=[
                     html.Div("Várható beérkező", className="kpi-label"),
                     html.Div(id="kpi-bec-total", className="kpi-value kpi-countup", children="–"),
-                    html.Span("▾", className="kpi-expand-arrow"),
+                    html.Span(_fi("chev-down"), className="kpi-expand-arrow"),
                 ]),
                 # Condensed-header (hdr-mini) replacement for the total value:
                 # the four status squares with compact tonne values. Hidden in
@@ -2716,10 +2614,10 @@ def _kpi_trend_shell() -> html.Section:
             ]),
             html.Div(className="kpi-trend-toolbar", children=[
                 # Breakdown (3 filters) — LMP / Országok / Prefix
-                html.Div(className="kpi-trend-ctl", id="kpi-trend-breakdown", role="tablist"),
+                html.Div(className="kpi-trend-ctl", id="kpi-trend-breakdown", role="group"),
                 # View toggle — Nap / Hét
                 html.Div(className="kpi-trend-ctl kpi-trend-ctl-view", id="kpi-trend-view",
-                         role="tablist"),
+                         role="group"),
             ]),
         ]),
         html.Div(id="kpi-trend-range", className="kpi-trend-range"),
@@ -2753,10 +2651,10 @@ def _kpi_temu_shell() -> html.Section:
                 html.Div(className="kpi-temu-ctl kpi-temu-ctl-dates", id="kpi-temu-dates"),
                 # Compare toggle — pin two ranges (A vs B) on the chart
                 html.Div(className="kpi-temu-ctl kpi-temu-ctl-compare", id="kpi-temu-compare",
-                         role="tablist"),
+                         role="group"),
                 # View toggle — Day / Week
                 html.Div(className="kpi-temu-ctl kpi-temu-ctl-view", id="kpi-temu-view",
-                         role="tablist"),
+                         role="group"),
             ]),
         ]),
         # Country pre-filter chips (All + per country).
@@ -2783,13 +2681,13 @@ def _kpi_flow_section() -> html.Section:
     return html.Section(className="kpi-snap-section kpi-flow-section", children=[
         html.Div(className="kpi-flow-mode-row", children=[
             html.Div(className="kpi-flow-mode-control", id="kpi-flow-mode-control",
-                     role="tablist", **{"aria-label": "KPI flow chart mode"}, children=[
+                     role="group", **{"aria-label": "KPI flow chart mode"}, children=[
                 html.Button("Shift based", className="kpi-flow-mode-btn is-on",
-                            id="kpi-flow-mode-shift", role="tab",
-                            **{"data-flow-mode": "shift", "aria-selected": "true"}, n_clicks=0),
+                            id="kpi-flow-mode-shift",
+                            **{"data-flow-mode": "shift", "aria-pressed": "true"}, n_clicks=0),
                 html.Button("Day based", className="kpi-flow-mode-btn",
-                            id="kpi-flow-mode-day", role="tab",
-                            **{"data-flow-mode": "day", "aria-selected": "false"}, n_clicks=0),
+                            id="kpi-flow-mode-day",
+                            **{"data-flow-mode": "day", "aria-pressed": "false"}, n_clicks=0),
             ]),
         ]),
         html.Div(className="kpi-page-grid", children=[
@@ -2804,20 +2702,20 @@ def _kpi_flow_section() -> html.Section:
                 ]),
                 html.Div(className="kpi-flow-day-controls", children=[
                     html.Div(className="kpi-flow-period-control", id="kpi-flow-period-control",
-                             role="tablist", **{"aria-label": "KPI flow day range"}, children=[
+                             role="group", **{"aria-label": "KPI flow day range"}, children=[
                         html.Button("7 day", className="kpi-flow-period-btn is-on",
-                                    role="tab", **{"data-flow-days": "7", "aria-selected": "true"}, n_clicks=0),
+                                    **{"data-flow-days": "7", "aria-pressed": "true"}, n_clicks=0),
                         html.Button("14 day", className="kpi-flow-period-btn",
-                                    role="tab", **{"data-flow-days": "14", "aria-selected": "false"}, n_clicks=0),
+                                    **{"data-flow-days": "14", "aria-pressed": "false"}, n_clicks=0),
                     ]),
                     html.Div(className="kpi-flow-unit-control", id="kpi-flow-unit-control",
-                             role="tablist", **{"aria-label": "KPI flow unit"}, children=[
+                             role="group", **{"aria-label": "KPI flow unit"}, children=[
                         html.Button("kg", className="kpi-flow-unit-btn is-on",
-                                    role="tab", **{"data-flow-unit": "kg", "aria-selected": "true"}, n_clicks=0),
+                                    **{"data-flow-unit": "kg", "aria-pressed": "true"}, n_clicks=0),
                         html.Button("colli", className="kpi-flow-unit-btn",
-                                    role="tab", **{"data-flow-unit": "colli", "aria-selected": "false"}, n_clicks=0),
+                                    **{"data-flow-unit": "colli", "aria-pressed": "false"}, n_clicks=0),
                         html.Button("parcel", className="kpi-flow-unit-btn",
-                                    role="tab", **{"data-flow-unit": "parcel", "aria-selected": "false"}, n_clicks=0),
+                                    **{"data-flow-unit": "parcel", "aria-pressed": "false"}, n_clicks=0),
                     ]),
                 ]),
             ]),
@@ -2945,13 +2843,13 @@ def _kpi_bands_section() -> html.Section:
             ]),
             html.Div(className="kpi-bands-controls", children=[
                 html.Div(className="kpi-bands-day-nav", children=[
-                    html.Button("‹", className="kpi-bands-day-btn",
-                                **{"data-band-day": "prev"}, n_clicks=0),
+                    html.Button(_fi("chev-left"), className="kpi-bands-day-btn",
+                                **{"data-band-day": "prev", "aria-label": "Previous day"}, n_clicks=0),
                     html.Span(id="kpi-bands-day-label", className="kpi-bands-day-label"),
                     html.Select(id="kpi-bands-day-select", className="kpi-bands-day-select",
                                 **{"aria-label": "Select operational day"}),
-                    html.Button("›", className="kpi-bands-day-btn",
-                                **{"data-band-day": "next"}, n_clicks=0),
+                    html.Button(_fi("chev-right"), className="kpi-bands-day-btn",
+                                **{"data-band-day": "next", "aria-label": "Next day"}, n_clicks=0),
                 ]),
                 html.Div(className="kpi-bands-toggle", **{"data-toggle": "metric"}, children=[
                     html.Button("KG", className="kpi-bands-tg-btn is-active",
@@ -4166,6 +4064,26 @@ def _saturation_color(pct: float) -> str:
     return "#34d399"       # normal
 
 
+def _css_rgb(value, default: str = "139,148,158") -> str:
+    """'#rgb' / '#rrggbb[aa]' / 'rgb(a)(r,g,b,…)' -> 'r,g,b' triplet for
+    rgba(var(--x-rgb), a) in CSS (the portable renderer drops color-mix())."""
+    s = str(value or "").strip()
+    if s.startswith("#"):
+        h = s[1:]
+        if len(h) in (3, 4):
+            h = "".join(ch * 2 for ch in h[:3])
+        if len(h) >= 6:
+            try:
+                return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
+            except ValueError:
+                return default
+        return default
+    m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", s)
+    if m:
+        return ",".join(m.groups())
+    return default
+
+
 def _header_saturation_style_and_title(kpi: dict) -> tuple[dict, str, str]:
     saturation = _tracking_saturation(kpi)
     pct = saturation["ratio"] * 100
@@ -4177,6 +4095,7 @@ def _header_saturation_style_and_title(kpi: dict) -> tuple[dict, str, str]:
             "--warehouse-sat-pct": f"{pct:.2f}%",
             "--warehouse-sat-tip-x": f"{tip_pct:.2f}%",
             "--warehouse-sat-color": _saturation_color(pct),
+            "--warehouse-sat-rgb": _css_rgb(_saturation_color(pct)),
             "--warehouse-sat-alpha": "1" if saturation["capacity"] or saturation["kg"] else "0.28",
         },
         f"Raktár telítettség: {kg_txt} / {cap_txt} ({pct:.1f}%)",
@@ -4378,20 +4297,57 @@ def _priority_test_df() -> pd.DataFrame:
     return apply_priorities(pd.DataFrame(rows))
 
 
-def _has_due_arrival_transition(df) -> bool:
+def _due_arrival_awbs(df, now=None) -> frozenset:
+    """AWBs parsed as en-route whose arrival time has already passed.
+
+    `is_en_route` is frozen at parse time, so these rows stay "due" until the
+    next source read. Vectorised: no per-poll to_dict("records")."""
     if df is None or getattr(df, "empty", True):
-        return False
+        return frozenset()
     if "is_en_route" not in df.columns or "truck_arrival_time" not in df.columns:
-        return False
-    now = datetime.now()
+        return frozenset()
+    now = now or datetime.now()
     try:
-        return any(
-            bool(row.get("is_en_route")) and isinstance(row.get("truck_arrival_time"), datetime)
-            and row.get("truck_arrival_time") <= now
-            for row in df.to_dict("records")
-        )
+        en_route = df["is_en_route"].fillna(False).astype(bool)
+        arrival = pd.to_datetime(df["truck_arrival_time"], errors="coerce")
+        mask = en_route & arrival.notna() & (arrival <= now)
+        if not mask.any():
+            return frozenset()
+        keys = df.loc[mask, "awb"] if "awb" in df.columns else df.index[mask].to_series()
+        return frozenset(str(k) for k in keys)
     except Exception:
+        return frozenset()
+
+
+_ARRIVAL_FIRED_LOCK = threading.Lock()
+_ARRIVAL_FIRED: dict = {"df_id": None, "due": frozenset()}
+
+
+def _arrival_transition_should_fire(df, due: frozenset) -> bool:
+    """True once per new set of due AWBs on the same parsed DataFrame."""
+    if not due:
         return False
+    sig_id = id(df)
+    with _ARRIVAL_FIRED_LOCK:
+        if _ARRIVAL_FIRED["df_id"] == sig_id and due <= _ARRIVAL_FIRED["due"]:
+            return False
+        prev = _ARRIVAL_FIRED["due"] if _ARRIVAL_FIRED["df_id"] == sig_id else frozenset()
+        _ARRIVAL_FIRED["df_id"] = sig_id
+        _ARRIVAL_FIRED["due"] = prev | due
+        return True
+
+
+def _has_due_arrival_transition(df) -> bool:
+    """Fire the en-route -> arrived transition ONCE, via data_version.
+
+    On a new due set it bumps data_version; the NEXT poll then sees a changed
+    version in every gated callback and on every client, so each re-renders
+    exactly once (<= one poll later). Always returns False, so the poll that
+    detected it does not render a second time with the stale version."""
+    due = _due_arrival_awbs(df)
+    if _arrival_transition_should_fire(df, due):
+        data_cache.bump_data_version()
+    return False
 
 
 def _clean_text(value, fallback: str = "") -> str:
@@ -4401,14 +4357,6 @@ def _clean_text(value, fallback: str = "") -> str:
     if not text or text.lower() in {"nan", "nat", "none", "n/a"}:
         return fallback
     return text
-
-
-def _fmt_num(value, suffix: str = "") -> str:
-    try:
-        num = float(value or 0)
-    except (TypeError, ValueError):
-        num = 0.0
-    return f"{num:.0f}{suffix}" if num else ""
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -4566,9 +4514,16 @@ def _make_notes_block(awb: str) -> html.Details:
             html.Div(className="note-meta", children=[
                 html.Span(f"{n.get('by', '?')} · {_fmt_note_at(n.get('at', ''))}",
                           className="note-meta-text"),
-                html.Button("✕", id={"type": "note-del", "index": f"{awb}|{n.get('id', '')}"},
-                            className="note-del-btn", n_clicks=0,
-                            title="Megjegyzés törlése"),
+                # Two-step delete (shared data): card_fx.js arms the first
+                # click and only lets the second click reach Dash.
+                html.Button(
+                    [html.Span(className="note-del-icon", **{"aria-hidden": "true"}),
+                     html.Span("Törlöd?", className="note-del-confirm")],
+                    id={"type": "note-del", "index": f"{awb}|{n.get('id', '')}"},
+                    className="note-del-btn", n_clicks=0, type="button",
+                    title="Megjegyzés törlése",
+                    **{"aria-label": "Megjegyzés törlése"},
+                ),
             ]),
         ]))
     count = len(notes)
@@ -4582,10 +4537,15 @@ def _make_notes_block(awb: str) -> html.Details:
             html.Div(className="card-notes-body", children=[
                 *note_rows,
                 html.Div(className="note-input-row", children=[
+                    # persistence keeps an unsent draft across poll re-renders
+                    # (the layout always sends value=""); the key changes when
+                    # the note list changes, so a successful add clears it.
                     dcc.Input(id={"type": "note-input", "index": awb}, type="text",
                               maxLength=notes_manager.MAX_NOTE_LEN,
                               placeholder="Új megjegyzés…", className="note-input",
-                              n_submit=0, value=""),
+                              n_submit=0, value="",
+                              persistence=f"{count}:{notes[-1].get('id', '') if notes else ''}",
+                              persistence_type="memory"),
                     html.Button("Hozzáad", id={"type": "note-add", "index": awb},
                                 className="note-add-btn", n_clicks=0),
                 ]),
@@ -4656,10 +4616,10 @@ def _make_card(
         # Úton lévő tételt nem lehet betárolni — még meg sem érkezett.
         store_el = html.Span()
     elif is_snapshot or (betarolt_view and not can_unstore):
-        store_el = html.Span("✓ Betárolva", className="badge-stored badge-stored-disabled")
+        store_el = html.Span([_fi("tick", "fi-gap"), "Betárolva"], className="badge-stored badge-stored-disabled")
     elif is_stored_flag:
         store_el = html.Button(
-            "✓ Betárolva",
+            [_fi("tick", "fi-gap"), "Betárolva"],
             id={"type": "store-btn", "index": awb},
             className="badge-stored badge-stored-active",
             n_clicks=0,
@@ -4722,7 +4682,9 @@ def _make_card(
     since = _fmt_since(row.get("am_time"))
     truck_focus_label = plate + (f" · {_fmt_dt(row.get('am_time'))}" if plate and row.get("am_time") else "")
 
-    compact_body = html.Div(className="card-body-compact", children=[
+    compact_body = html.Div(className="card-body-compact", role="button", tabIndex=0,
+                            **{"aria-expanded": "false"},
+                            children=[
         html.Div(className="card-awb", children=[
             html.Span(awb, className="awb-text"),
             html.Span(
@@ -4819,7 +4781,7 @@ def _make_card(
         ]),
     ])
 
-    card_style = {"--card-color": color}
+    card_style = {"--card-color": color, "--card-rgb": _css_rgb(color)}
     if plate:
         card_style["--plate-color"] = plate_col
         card_style["--plate-color-soft"] = _css_alpha(plate_col, 0.18)
@@ -4904,147 +4866,6 @@ def _build_summary_table(df):
     ])
 
 
-def _make_outbound_card(row: dict, filter_tokens: str | None = None) -> html.Div:
-    ck = row.get("priority_color", "standard")
-    color = _COLOR.get(ck, "#8b949e")
-    glabs_items = row.get("glabs_items", [])
-
-    badges = [
-        html.Span(f"{row.get('lmp_count', 0)} lerakó", className="badge-cargo badge-uld")
-    ]
-    if row.get("in_rest"):
-        badges.insert(0, html.Span("PIHENŐ", className="badge-shippable"))
-
-    header = html.Div(className="card-strip", style={"background": color}, children=[
-        html.Span(f"#{row.get('rank', '-')}", className="rank-num"),
-        html.Span(_clean_text(row.get("status_label")), className="priority-label-text"),
-        *badges,
-    ])
-
-    timing = []
-    if row.get("checkin"):
-        timing.append(html.Div(className="card-row", children=[
-            html.Span("Bejelentkezés:", className="row-label"),
-            html.Span(_fmt_dt(row.get("checkin")), className="row-value"),
-        ]))
-    if row.get("last_issue"):
-        timing.append(html.Div(className="card-row", children=[
-            html.Span("Utolsó kiadás:", className="row-label"),
-            html.Span(_fmt_dt(row.get("last_issue")), className="row-value"),
-        ]))
-    if row.get("in_rest"):
-        rest_label = "folyamatban"
-        if row.get("rest_until"):
-            try:
-                rest_label = row["rest_until"].strftime("%m.%d %H:%M") + "-ig"
-            except Exception:
-                pass
-        timing.append(html.Div(className="rest-warning", children=[
-            html.Span(f"Pihenőn: {rest_label}", className="rest-text")
-        ]))
-
-    plate_clean = _clean_text(row.get("plate")) or ""
-    glabs_blocks = []
-    for glabs in glabs_items[:8]:
-        awb_rows = []
-        for item in glabs.get("awb_items", [])[:80]:
-            status = _clean_text(item.get("status"))
-            lmp = _clean_text(item.get("lmp"))
-            lmp_group = int(item.get("lmp_group", 0) or 0) % 8
-            status_cls = "is-issued" if item.get("is_issued") else "is-ready" if item.get("is_ready") else "is-open"
-            detail_bits = [
-                _fmt_num(item.get("boxes"), " colli"),
-                _fmt_num(item.get("weight"), " kg"),
-            ]
-            detail_text = " · ".join(bit for bit in detail_bits if bit)
-            awb_rows.append(html.Div(className=f"outbound-awb-row {status_cls} lmp-g{lmp_group}", children=[
-                html.Div(className="outbound-awb-main", children=[
-                    html.Div(className="outbound-awb-head", children=[
-                        html.Span(_clean_text(item.get("awb")), className="outbound-awb-code"),
-                        html.Span(lmp, className="outbound-lmp-chip") if lmp else html.Span(),
-                    ]),
-                    html.Span(detail_text, className="outbound-awb-meta") if detail_text else html.Span(),
-                ]),
-                html.Span(status, className="outbound-status-pill") if status else html.Span(),
-            ]))
-
-        glabs_label = _clean_text(glabs.get("glabs_id"))
-        glabs_blocks.append(html.Details(className="outbound-glabs-block", children=[
-            html.Summary(className="outbound-glabs-summary", children=[
-                html.Div(className="outbound-glabs-title", children=[
-                    html.Span(glabs_label, className="glabs-id") if glabs_label else html.Span(),
-                    html.Span(f"{glabs.get('total', 0)} tétel", className="outbound-ready-pill"),
-                ]),
-                _progress_bar(
-                    int(glabs.get("ready", 0)),
-                    int(glabs.get("total", 0)),
-                    color,
-                    f"{glabs.get('ready', 0)}/{glabs.get('total', 0)} kiadható",
-                ),
-            ]),
-            html.Div(className="outbound-awb-list", children=awb_rows),
-        ]))
-
-    # Quick-print buttons — one per GLABS, always visible in card top-right
-    print_btns = [
-        html.Button(
-            "🖨 Rakodási terv",
-            id={"type": "print-glabs-btn", "index": f"{plate_clean}|||{_clean_text(g.get('glabs_id')) or ''}"},
-            className="outbound-qprint-btn",
-            n_clicks=0,
-            title=f"Rakodási terv — {_clean_text(g.get('glabs_id')) or ''}",
-        )
-        for g in glabs_items[:8]
-    ]
-
-    notes = [
-        html.Span(note, className="outbound-note")
-        for note in row.get("notes", [])[:3]
-    ]
-
-    body = html.Div(className="card-body-inner outbound-card-body", children=[
-        html.Div(className="outbound-card-top", children=[
-            html.Div(className="card-awb", children=[
-                html.Span(_clean_text(row.get("plate")), className="awb-text outbound-plate")
-            ]),
-            html.Div(className="outbound-print-strip", children=print_btns) if print_btns else html.Span(),
-        ]),
-        html.Div(className="card-meta", children=[
-            html.Span(_clean_text(row.get("lmp_summary")), className="lmp-text"),
-            html.Span(f"{row.get('issued', 0)}/{row.get('total', 0)} sor",
-                      className="weight-text", style={"color": color}),
-        ]),
-        *timing,
-        html.Div(className="outbound-summary-grid", children=[
-            html.Div([html.Span("Colli", className="row-label"), html.Strong(_fmt_num(row.get("boxes")))]),
-            html.Div([html.Span("Súly", className="row-label"), html.Strong(_fmt_num(row.get("weight"), " kg"))]),
-            html.Div([html.Span("Lokáció", className="row-label"), html.Strong(_clean_text(row.get("locations")))]),
-        ]),
-        html.Div(className="outbound-notes", children=notes) if notes else html.Span(),
-        html.Div(className="lp-section outbound-glabs-list", children=glabs_blocks),
-    ])
-
-    # Rendszám nélküli tételek GLABS-onként külön kártyák, AZONOS "NINCS RENDSZÁM"
-    # felirattal — a FLIP-kulcs (data-card-key) viszont legyen egyedi a GLABS-szal,
-    # különben a card_fx.js animáció összekeverné a pozíciókat.
-    _plate_text = _clean_text(row.get("plate"))
-    _card_key = _plate_text
-    if _plate_text == "NINCS RENDSZÁM":
-        _gids = row.get("glabs_items") or []
-        if _gids:
-            _card_key = f"{_plate_text}|{_clean_text(_gids[0].get('glabs_id'))}"
-
-    return html.Div(
-        className=f"priority-card pcard-{ck} outbound-card",
-        style={"--card-color": color},
-        **{
-            "data-card-key": f"outbound:{_card_key}",
-            "data-filter": filter_tokens or "all",
-        },
-        children=[header, body],
-    )
-
-
 def _inbound_filter_tokens(row: dict, betarolt_view: bool = False) -> str:
     if betarolt_view:
         return "betarolt"
@@ -5062,29 +4883,29 @@ def _inbound_filter_tokens(row: dict, betarolt_view: bool = False) -> str:
     return " ".join(tokens)
 
 
-def _outbound_filter_tokens(row: dict) -> str:
-    active = _safe_int(row.get("active"), 0)
-    ready = _safe_int(row.get("ready"), 0)
-    has_checkin = bool(row.get("checkin"))
-    in_rest = bool(row.get("in_rest"))
+def _key_cards(cards):
+    """Give every card a stable Dash id from its data-card-key (AWB / outbound key).
 
-    tokens = ["all"]
-    if active > 0 and has_checkin and not in_rest:
-        tokens.append("at_hu")
-    if active > 0 and ready > 0 and not has_checkin and not in_rest:
-        tokens.append("driver")
-    if in_rest:
-        tokens.append("scheduled")
-    if active > 0 and not has_checkin and ready == 0 and not in_rest:
-        tokens.append("shippable")
-    if active == 0:
-        tokens.append("betarolt")
-    return " ".join(tokens)
+    dash-renderer keys children by `id` when present, otherwise by POSITION.
+    Without an id, removing one card (Betárolva) made React write the next
+    card's props into the previous card's DOM node: the wrong card vanished,
+    an open details/note draft jumped to a neighbour, and count-ups started
+    from the neighbour's value. No callback listens to type "prio-card"."""
+    seen = {}
+    for card in cards or []:
+        key = getattr(card, "data-card-key", None)
+        if not key or getattr(card, "id", None) is not None:
+            continue
+        key = str(key)
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        card.id = {"type": "prio-card", "index": key if n == 0 else f"{key}#{n}"}
+    return cards
 
 
 def _cards_grid(cards, class_name: str = "cards-grid", empty_text: str = "Nincs tétel ebben a kategóriában.") -> html.Div:
     return html.Div(children=[
-        html.Div(className=class_name, children=cards),
+        html.Div(className=class_name, children=_key_cards(cards)),
         html.Div(empty_text, className="empty-state filter-empty-state", style={"display": "none"}),
     ])
 
@@ -5924,7 +5745,7 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
     if current_stack:
         row_classes += " uld-row-in-stack"
         if gha_color:
-            row_style = {"--stack-accent": gha_color, "--stack-accent-bg": f"{gha_color}14"}
+            row_style = {"--stack-accent": gha_color, "--stack-accent-rgb": _css_rgb(gha_color, "99,102,241"), "--stack-accent-bg": f"{gha_color}14"}
     if prepared:
         row_classes += " uld-row-prepared"
 
@@ -5956,7 +5777,9 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
         ))
     if current_stack:
         stack_name = (stack_name_map or {}).get(current_stack.get("id")) or current_stack.get("name") or "Stack"
-        badge_style = {
+        # Separate name: badge_style (prefix color) is still used below by the
+        # .uld-type-badge; overwriting it made stacked rows lose the prefix color.
+        stack_badge_style = {
             "--stack-gha-color":  gha_color,
             "--stack-gha-bg":     f"{gha_color}22",
             "--stack-gha-border": f"{gha_color}55",
@@ -5964,7 +5787,7 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
         meta_children.append(html.Span(
             stack_name,
             className="uld-in-stack-badge",
-            style=badge_style,
+            style=stack_badge_style,
             title="Stackben van - a stack panelen távolítható el",
         ))
     else:
@@ -5979,7 +5802,7 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
         meta_children.append(html.Span(
             gha_display,
             className=gha_class,
-            style={"--gha-color": gha_color} if gha_color else None,
+            style={"--gha-color": gha_color, "--gha-rgb": _css_rgb(gha_color, "99,102,241")} if gha_color else None,
             title=gha_title,
         ))
 
@@ -5987,6 +5810,7 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
         key=f"uld-row-{uld_num}",
         className=row_classes,
         style=row_style,
+        tabIndex=0,
         **{
             "data-uld": uld_num,
             "data-prefix": uld_type[:3].upper(),
@@ -6016,7 +5840,7 @@ def _make_uld_row(uld: dict, stacks: list[dict], gha_color_map: dict | None = No
                 html.Div(className="uld-row-num", children=uld_num),
                 html.Div(className="uld-row-meta", children=meta_children),
             ]),
-            html.Button("✎", className="uld-row-edit", title="ULD adatok szerkesztése",
+            html.Button(_fi("pencil"), className="uld-row-edit", title="ULD adatok szerkesztése",
                         **{"aria-label": f"{uld_num} adatainak szerkesztése"}),
             html.Div(
                 className=f"uld-countdown uld-cd-{status}",
@@ -6061,7 +5885,7 @@ def _uld_search_summary(all_uld: list[dict], search_text: str,
             html.Div(className="uld-ss-archive-list", children=[
                 html.Span([
                     html.Span(term, className="uld-ss-near-query"),
-                    html.Span(" → ", className="uld-ss-near-arrow"),
+                    html.Span(_fi("arrow-right"), className="uld-ss-near-arrow"),
                     html.Span(hit.get("uld_number", ""), className="uld-ss-archive-hit"),
                     html.Span(f" · {int((hit.get('elapsed_hours') or 0) // 24)} napja",
                               className="uld-ss-archive-age"),
@@ -6265,7 +6089,7 @@ def _dispatched_hits_callout(hits: list[dict]):
             children=[
                 html.Span("≈", className="uld-ss-disp-near") if h.get("near") else None,
                 html.Span(h["uld_number"], className="uld-ss-disp-uld"),
-                html.Span("→", className="uld-ss-disp-arrow"),
+                html.Span(_fi("arrow-right"), className="uld-ss-disp-arrow"),
                 html.Span(h["stack_name"], className="uld-ss-disp-stack"),
                 html.Span(" · ".join(meta_bits), className="uld-ss-disp-meta") if meta_bits else None,
             ],
@@ -6281,7 +6105,7 @@ def _dispatched_hits_callout(hits: list[dict]):
         title="Kiküldött stackek megnyitása - a keresés megmarad és a találat kiemelve látszik",
         children=[
             html.Div(className="uld-ss-disp-head", children=[
-                html.Span("⇥", className="uld-ss-disp-ico"),
+                html.Span(_fi("dispatch"), className="uld-ss-disp-ico"),
                 html.Span(
                     f"{n} keresett ULD kiküldött stackben van"
                     if n != 1 else "A keresett ULD kiküldött stackben van",
@@ -6384,23 +6208,26 @@ def _make_uld_list_section(uld_data: list[dict], stacks: list[dict], gha_color_m
                              className="uld-list-empty-sub"),
                 ])]
             # A specific search with no hit: tell the user it isn't an *active* ULD,
-            # rather than silently showing a different (near-match) ULD. Note that
-            # the active board only lists ULDs still out (Vissza field empty);
-            # an already-returned ULD exists in E_COMM but is intentionally not here.
+            # rather than silently showing a different (near-match) ULD. The active
+            # board only lists ULDs still out (Vissza field empty). One short line +
+            # a jump to the dispatched view (same handler as the dispatched callout,
+            # uld_manager.js .uld-ss-dispatched-jump; the search term is kept).
             return [html.Div(className="uld-list-empty", key="uld-list-empty", children=[
-                html.Div(f"Nincs aktív ULD erre a keresésre: {term}", className="uld-list-empty-title"),
-                html.Div("Lehet, hogy már visszaérkezett (Vissza mező kitöltve), vagy nem aktív tétel. "
-                         "Az aktív lista csak a még kint lévő ULD-ket mutatja.",
-                         className="uld-list-empty-sub"),
+                html.Div(f"Nincs aktív ULD: {term}", className="uld-list-empty-title"),
+                html.Button("Keresés a kiadottakban", type="button",
+                            className="uld-list-empty-reset uld-ss-dispatched-jump"),
             ])]
-        return [html.Div("Nincs találat - minden ULD visszaérkezett, vagy túl szigorú a szűrés.", className="uld-list-empty", key="uld-list-empty")]
+        return [html.Div(className="uld-list-empty", key="uld-list-empty", children=[
+            html.Div("Nincs találat", className="uld-list-empty-title"),
+            # Same handler as #uld-reset-btn (uld_manager.js, data-uld-action).
+            html.Button("Szűrők törlése", type="button", className="uld-list-empty-reset",
+                        **{"data-uld-action": "reset-filters"}),
+        ])]
     uld_lookup = {u["uld_number"]: u for u in (all_uld or uld_data)}
     stack_name_map = _stack_display_name_map(stacks, uld_lookup)
-    prepared_ulds = {u for s in stacks if s.get("prepared") for u in s.get("ulds", [])}
-    # Stable sort: ULDs in prepared stacks go to the end, original order preserved otherwise.
-    # Bulk searches keep the pasted line order, because each line is an explicit requested hit.
-    ordered = uld_data if preserve_order else sorted(uld_data, key=lambda u: 1 if u.get("uld_number") in prepared_ulds else 0)
-    return [_make_uld_row(u, stacks, gha_color_map, stack_name_map) for u in ordered]
+    # Display only. The prepared-last ordering is applied to the whole filtered
+    # list before pagination (render_uld_view); bulk searches keep line order.
+    return [_make_uld_row(u, stacks, gha_color_map, stack_name_map) for u in uld_data]
 
 
 _ULD_PAGE_SIZE = 25
@@ -6414,14 +6241,16 @@ def _make_pagination(total: int, page: int) -> html.Div | None:
     start_item = (page - 1) * _ULD_PAGE_SIZE + 1
     end_item = min(page * _ULD_PAGE_SIZE, total)
 
-    def _pgbtn(label: str, target: int, extra: str = "", disabled: bool = False, title: str = "") -> html.Button:
+    def _pgbtn(label, target: int, extra: str = "", disabled: bool = False, title: str = "") -> html.Button:
         cls = f"uld-pg-btn {extra}{' uld-pg-disabled' if disabled else ''}".strip()
-        return html.Button(label, className=cls, title=title, disabled=disabled,
-                           **{"data-page": str(target), "data-action": "go"})
+        attrs = {"data-page": str(target), "data-action": "go"}
+        if title:
+            attrs["aria-label"] = title
+        return html.Button(label, className=cls, title=title, disabled=disabled, **attrs)
 
     buttons: list = []
-    buttons.append(_pgbtn("«", 1,            "uld-pg-first", disabled=(page == 1),            title="Első oldal"))
-    buttons.append(_pgbtn("‹", page - 1,     "uld-pg-prev",  disabled=(page == 1),            title="Előző oldal"))
+    buttons.append(_pgbtn(_fi("chevs-left"), 1,            "uld-pg-first", disabled=(page == 1),            title="Első oldal"))
+    buttons.append(_pgbtn(_fi("chev-left"), page - 1,     "uld-pg-prev",  disabled=(page == 1),            title="Előző oldal"))
 
     lo = max(1, page - 2)
     hi = min(total_pages, page + 2)
@@ -6434,8 +6263,8 @@ def _make_pagination(total: int, page: int) -> html.Div | None:
     if hi < total_pages:
         buttons.append(html.Span("…", className="uld-pg-ellipsis"))
 
-    buttons.append(_pgbtn("›", page + 1,     "uld-pg-next",  disabled=(page == total_pages),  title="Következő oldal"))
-    buttons.append(_pgbtn("»", total_pages,  "uld-pg-last",  disabled=(page == total_pages),  title="Utolsó oldal"))
+    buttons.append(_pgbtn(_fi("chev-right"), page + 1,     "uld-pg-next",  disabled=(page == total_pages),  title="Következő oldal"))
+    buttons.append(_pgbtn(_fi("chevs-right"), total_pages,  "uld-pg-last",  disabled=(page == total_pages),  title="Utolsó oldal"))
 
     return html.Div(className="uld-pg-wrap", children=[
         html.Span(f"{start_item}–{end_item} / {total} ULD", className="uld-pg-info"),
@@ -6466,6 +6295,32 @@ def _make_uld_loading() -> list:
     ] + skeletons
 
 
+def _uld_retry_due(state: dict, now: datetime | None = None) -> bool:
+    """True once the failed fast ULD read may be retried (backoff elapsed)."""
+    failed_at = state.get("uld_read_error_at")
+    if not isinstance(failed_at, datetime):
+        return True
+    now = now or datetime.now()
+    return (now - failed_at).total_seconds() >= data_cache._ULD_RETRY_BACKOFF_S
+
+
+def _make_uld_read_error(state: dict) -> list:
+    """Error state for the ULD list when no good ULD read exists yet.
+
+    Replaces the endless skeleton: the reason and time of the last failed read
+    are shown, with the shared "Újrapróbálás" action (full refresh)."""
+    failed_at = state.get("uld_read_error_at")
+    meta = f"Utolsó próbálkozás: {failed_at.strftime('%H:%M:%S')}" if isinstance(failed_at, datetime) else ""
+    meta = (meta + " · " if meta else "") + "automatikus újrapróba percenként"
+    return [
+        html.Div(key="uld-read-error", className="uld-read-error", children=_data_state_panel(
+            "error", "Az ULD adatok nem olvashatók",
+            detail=str(state.get("uld_read_error") or "Ismeretlen hiba"),
+            meta=meta, retry=True,
+        )),
+    ]
+
+
 def _make_uld_empty() -> list:
     """Empty state for the active ULD list.
 
@@ -6478,11 +6333,6 @@ def _make_uld_empty() -> list:
     return [
         html.Div(className="uld-list-empty", key="uld-list-empty", children=[
             html.Div("Nincs aktív ULD", className="uld-list-empty-title"),
-            html.Div(
-                "Jelenleg nincs az aktív ablakon belüli, még vissza nem adott ULD. "
-                "Amint egy új ULD Áttár ideje megjelenik az E_COMM-ben, automatikusan itt lesz.",
-                className="uld-list-empty-sub",
-            ),
         ]),
     ]
 
@@ -6764,10 +6614,11 @@ def _make_stack_column(stack: dict, uld_lookup: dict, search_text: str = "", gha
                     html.Span(pos, className="uld-si-pos") if pos else None,
                 ]),
                 html.Button(
-                    "×",
+                    _fi("x"),
                     className="uld-si-remove",
                     title="Eltávolítás stackből",
-                    **{"data-uld": uld_num},
+                    type="button",
+                    **{"data-uld": uld_num, "aria-label": f"{uld_num} eltávolítása a stackből"},
                 ),
             ],
         ))
@@ -6816,15 +6667,17 @@ def _make_stack_column(stack: dict, uld_lookup: dict, search_text: str = "", gha
                 html.Div(className="uld-stack-head-main", children=[
                     # Accordion caret — CSS hides it for empty/non-collapsible stacks
                     # (those stay open with their drop hint visible).
-                    html.Span("▸", className="uld-stack-caret", **{"aria-hidden": "true"}),
+                    html.Span(_fi("chev-right"), className="uld-stack-caret", **{"aria-hidden": "true"}),
                     # GHA badge is now built INTO the stack name: the name pill carries
                     # the per-GHA colour (same scheme as the old separate GHA badge).
                     html.Span(
                         display_name,
                         className="uld-stack-name" + (" uld-stack-name-gha" if single_gha else ""),
-                        title="Dupla kattintás az átnevezéshez",
+                        title="Dupla kattintás vagy F2: átnevezés",
+                        role="button", tabIndex=0,
                         style=({
                             "--gha-color": gha_c,
+                            "--gha-rgb": _css_rgb(gha_c, "99,102,241"),
                             "--gha-bg": f"{gha_c}22",
                             "--gha-border": f"{gha_c}59",
                         } if single_gha else {}),
@@ -6948,6 +6801,7 @@ def _make_dispatched_stack_card(stack: dict, uld_times_full: dict, display_name:
             className="uld-dlist-touch-item" + (" uld-dlist-touch-item-match" if is_match else ""),
             style={
                 "--touch-color": gha_col,
+                "--touch-rgb": _css_rgb(gha_col, "99,102,241"),
                 "--touch-bg": f"{gha_col}1f",
                 "--touch-border": f"{gha_col}66",
             },
@@ -6972,7 +6826,7 @@ def _make_dispatched_stack_card(stack: dict, uld_times_full: dict, display_name:
     return html.Div(
         key=f"uld-dlist-{stack.get('id')}",
         className="uld-dlist-row" + (" uld-dlist-row-match" if match_count else ""),
-        style={"--dc": gha_col, "--gha-color": gha_col, "--gha-bg": f"{gha_col}22", "--gha-border": f"{gha_col}59"},
+        style={"--dc": gha_col, "--gha-color": gha_col, "--gha-rgb": _css_rgb(gha_col, "99,102,241"), "--gha-bg": f"{gha_col}22", "--gha-border": f"{gha_col}59"},
         **{"data-stack-id": stack.get("id", ""), "data-match-count": str(match_count)},
         children=[
             html.Div(className="uld-dlist-name-wrap", children=[
@@ -7033,6 +6887,39 @@ def _dispatched_signature(stacks: list[dict], search_text: str, uld_times_full: 
     return hashlib.md5(blob.encode("utf-8")).hexdigest()
 
 
+def _uld_active_signature(state: dict, active_stacks: list[dict], all_uld: list[dict],
+                          status_filter, prefix_filter, gha_filter, search_text, page) -> str:
+    """Fingerprint of everything the ACTIVE ULD view renders.
+
+    A data_version bump is global (notes, stored flags, inbound refresh, own
+    stack writes echoed back by the file watcher). When none of the ULD inputs
+    changed, the poll returns no_update instead of rebuilding list + stack grid.
+    The "active:" prefix keeps it distinct from the dispatched-view signature
+    that shares the same store.
+    """
+    uld_times_full = state.get("uld_times_full") or {}
+    stack_times = {
+        str(uld): uld_times_full.get(uld)
+        for stack in active_stacks or [] for uld in (stack.get("ulds") or [])
+    }
+    try:
+        overrides = uld_stack_manager.get_uld_overrides()
+    except Exception:
+        overrides = None
+    payload = {
+        "records": all_uld,
+        "stacks": active_stacks,
+        "stack_times": stack_times,
+        "overrides": overrides,
+        "params": [status_filter or "all", prefix_filter or "", gha_filter or "",
+                   search_text or "", page or 1],
+        "flags": [bool(state.get("uld_last_refresh")), bool(state.get("uld_refreshing")),
+                  str(state.get("uld_read_error") or "")],
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+    return "active:" + hashlib.md5(blob.encode("utf-8")).hexdigest()
+
+
 def _make_dispatched_stacks_section(stacks: list[dict], all_uld: list[dict], search_text: str = "") -> list:
     try:
         _st = data_cache.get_state()
@@ -7044,7 +6931,7 @@ def _make_dispatched_stacks_section(stacks: list[dict], all_uld: list[dict], sea
     )
     if not dispatched:
         return [html.Div(className="uld-dlist-empty", key="uld-dispatched-empty", children=[
-            html.Span("⇥", className="uld-dlist-empty-ico"),
+            html.Span(_fi("dispatch"), className="uld-dlist-empty-ico"),
             html.Span("Nincs kiküldött stack.", className="uld-dlist-empty-txt"),
         ])]
     # ── Keresés: ULD-aware, with per-ULD match highlighting ─────────────────────
@@ -7105,7 +6992,7 @@ def _make_dispatched_stacks_section(stacks: list[dict], all_uld: list[dict], sea
         dispatched = filtered
         if not dispatched:
             return [html.Div(className="uld-dlist-empty", key="uld-dispatched-empty-search", children=[
-                html.Span("⌕", className="uld-dlist-empty-ico"),
+                html.Span(_fi("search"), className="uld-dlist-empty-ico"),
                 html.Span("Nincs találat a kiküldött stackek között.", className="uld-dlist-empty-txt"),
                 html.Span("A keresett ULD lehet, hogy nincs kiküldve, vagy más a helyesírása.",
                           className="uld-dlist-empty-sub"),
@@ -7257,7 +7144,7 @@ def _make_filter_chips(
             klass += " uld-chip-dim"
         prefix_chips.append(html.Button(
             p, className=klass,
-            style={"--chip-color": color, "--chip-bg": f"{color}22"},
+            style={"--chip-color": color, "--chip-color-rgb": _css_rgb(color, "100,116,139"), "--chip-bg": f"{color}22"},
             title="Kattintás: szűrés / Ctrl+kattintás: ULD típus kijelölése",
             **{"data-filter": "prefix", "data-value": p, "data-quick-select": "prefix"},
         ))
@@ -7281,7 +7168,7 @@ def _make_filter_chips(
             klass += " uld-chip-dim"
         gha_chips.append(html.Button(
             g, className=klass,
-            style={"--chip-color": color, "--chip-bg": f"{color}1f"},
+            style={"--chip-color": color, "--chip-color-rgb": _css_rgb(color, "100,116,139"), "--chip-bg": f"{color}1f"},
             title="Kattintás: szűrés / Ctrl+kattintás: GHA ULD-k kijelölése",
             **{"data-filter": "gha", "data-value": g, "data-quick-select": "gha"},
         ))
@@ -7348,8 +7235,6 @@ app.layout = html.Div(id="layout-root", children=[
     dcc.Store(id="dev-version", data=0),
     dcc.Store(id="user-activity"),
     dcc.Store(id="user-activity-applied"),
-    dcc.Store(id="print-glabs-store", data=None),
-    dcc.Store(id="print-action-dummy"),
     dcc.Store(id="uld-filter-store",        data="all"),
     dcc.Store(id="uld-trigger-store",       data=0),
     # Bumped by ops that change which ULDs are IN the list (e.g. kézi add creates
@@ -7368,10 +7253,10 @@ app.layout = html.Div(id="layout-root", children=[
     html.Div(id="print-only", style={"display": "none"}),
 
         # ULD action feedback toast — managed entirely by uld_manager.js
-        html.Div(id="uld-toast", className="uld-toast"),
+        html.Div(id="uld-toast", className="uld-toast", role="status", **{"aria-live": "polite"}),
 
         # ULD stack delete confirmation — custom modal managed by uld_manager.js
-        html.Div(id="uld-delete-modal", className="uld-delete-modal", **{"aria-hidden": "true"}, children=[
+        html.Div(id="uld-delete-modal", className="uld-delete-modal", role="dialog", **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "uld-delete-title"}, children=[
             html.Div(className="uld-delete-dialog", children=[
                 html.Div(className="uld-delete-kicker", children="Stack törlése"),
                 html.Div(id="uld-delete-title", className="uld-delete-title", children="Törlöd ezt a stacket?"),
@@ -7384,9 +7269,9 @@ app.layout = html.Div(id="layout-root", children=[
         ]),
 
         # ULD stack dispatch confirmation — custom modal managed by uld_manager.js
-        html.Div(id="uld-dispatch-modal", className="uld-delete-modal uld-dispatch-modal", **{"aria-hidden": "true"}, children=[
+        html.Div(id="uld-dispatch-modal", className="uld-delete-modal uld-dispatch-modal", role="dialog", **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "uld-dispatch-title"}, children=[
             html.Div(className="uld-delete-dialog uld-dispatch-dialog", children=[
-                html.Div(className="uld-delete-kicker uld-dispatch-kicker", children="Kiadás stack"),
+                html.Div(className="uld-delete-kicker uld-dispatch-kicker", children="Stack kiadása"),
                 html.Div(id="uld-dispatch-title", className="uld-delete-title", children="Kiadod ezt a stacket?"),
                 html.Div(id="uld-dispatch-text", className="uld-delete-text"),
                 html.Label(className="uld-dispatch-plate-field", children=[
@@ -7407,7 +7292,7 @@ app.layout = html.Div(id="layout-root", children=[
             ]),
         ]),
 
-        html.Div(id="uld-info-modal", className="uld-delete-modal uld-info-modal", **{"aria-hidden": "true"}, children=[
+        html.Div(id="uld-info-modal", className="uld-delete-modal uld-info-modal", role="dialog", **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "uld-info-title"}, children=[
             html.Div(className="uld-delete-dialog uld-info-dialog", children=[
                 html.Div(className="uld-delete-kicker uld-info-kicker", children="ULD információ"),
                 html.Div(id="uld-info-title", className="uld-delete-title", children="ULD"),
@@ -7418,14 +7303,14 @@ app.layout = html.Div(id="layout-root", children=[
             ]),
         ]),
 
-        html.Div(id="uld-manual-modal", className="uld-manual-modal", **{"aria-hidden": "true"}, children=[
+        html.Div(id="uld-manual-modal", className="uld-manual-modal", role="dialog", **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "uld-manual-title"}, children=[
             html.Div(className="uld-manual-dialog", children=[
                 html.Div(className="uld-manual-head", children=[
                     html.Div(children=[
                         html.Div("Kézi ULD", className="uld-manual-kicker"),
-                        html.Div(id="uld-manual-title", className="uld-manual-title", children="Hozzáadás to stack"),
+                        html.Div(id="uld-manual-title", className="uld-manual-title", children="Kézi ULD hozzáadása"),
                     ]),
-                    html.Button("X", id="uld-manual-close", className="uld-manual-close", title="Bezárás"),
+                    html.Button(_fi("x"), id="uld-manual-close", className="uld-manual-close", title="Bezárás", **{"aria-label": "Bezárás"}),
                 ]),
                 html.Div(className="uld-manual-grid", children=[
                     html.Label(className="uld-manual-field", children=[
@@ -7479,11 +7364,12 @@ app.layout = html.Div(id="layout-root", children=[
                                 **{"autoComplete": "off"},
                             ),
                             html.Button(
-                                "×",
+                                _fi("x"),
                                 id="uld-manual-datetime-clear",
                                 className="uld-manual-datetime-clear",
                                 title="Idő törlése - mentés idő nélkül",
                                 type="button",
+                                **{"aria-label": "Idő törlése"},
                             ),
                         ]),
                     ]),
@@ -7688,8 +7574,8 @@ app.layout = html.Div(id="layout-root", children=[
         html.Div(id="tv-refresh-fab", className="tv-refresh-fab"),
 
         # Exit FAB
-        html.Button("✕", id="tv-exit-btn", className="tv-exit-btn", n_clicks=0,
-                    title="Kilépés TV módból"),
+        html.Button(_fi("x"), id="tv-exit-btn", className="tv-exit-btn", n_clicks=0,
+                    title="Kilépés TV módból", **{"aria-label": "Kilépés TV módból"}),
 
         # Last refresh timestamp
         html.Div(id="tv-last-refresh", className="tv-last-refresh"),
@@ -7733,43 +7619,32 @@ app.layout = html.Div(id="layout-root", children=[
              ]),
 
     # INBOUND "Összegzés" — TOP 10 priority modal
-    html.Div(id="summary-overlay", className="summary-overlay", style={"display": "none"}, children=[
+    html.Div(id="summary-overlay", className="summary-overlay", style={"display": "none"}, role="dialog",
+             **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "summary-title"}, children=[
         html.Div(className="summary-dialog", children=[
             html.Div(className="summary-head", children=[
                 html.Div(children=[
-                    html.Div("Összegzés — TOP 10 prioritás", className="summary-title"),
+                    html.Div("Összegzés — TOP 10 prioritás", id="summary-title", className="summary-title"),
                     html.Div("Az aktív inbound lista legfontosabb tételei", className="summary-sub"),
                 ]),
                 html.Div(className="summary-actions", children=[
                     html.Button("Másolás", id="summary-copy-btn", className="summary-copy-btn", n_clicks=0),
-                    html.Button("X", id="summary-close", className="summary-close", n_clicks=0),
+                    html.Button(_fi("x"), id="summary-close", className="summary-close", n_clicks=0, **{"aria-label": "Bezárás"}),
                 ]),
             ]),
             html.Div(id="summary-body", className="summary-content"),
         ]),
     ]),
 
-    # Nyomtatás preview — full-screen editable loading plan preview
-    html.Div(id="print-preview-overlay", className="print-preview-overlay", style={"display": "none"}, children=[
-        html.Div(className="ppt-toolbar no-print", children=[
-            html.Span(id="ppt-info-text", className="ppt-info"),
-            html.Div(className="ppt-actions", children=[
-                html.Button("+ Sor", id="ppt-add-row", className="ppt-btn", n_clicks=0),
-                html.Button("🖨 Nyomtatás", id="ppt-print", className="ppt-btn ppt-btn-primary", n_clicks=0),
-                html.Button("✕ Bezárás", id="ppt-close", className="ppt-btn ppt-btn-close", n_clicks=0),
-            ]),
-        ]),
-        html.Div(id="print-preview-paper", className="ppt-paper"),
-    ]),
-
-    html.Div(id="settings-overlay", className="settings-overlay", style={"display": "none"}, children=[
+    html.Div(id="settings-overlay", className="settings-overlay", style={"display": "none"}, role="dialog",
+             **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "settings-title"}, children=[
         html.Div(className="settings-dialog", children=[
             html.Div(className="settings-head", children=[
                 html.Div(children=[
-                    html.Div("Beállítások", className="settings-title"),
+                    html.Div("Beállítások", id="settings-title", className="settings-title"),
                     html.Div("Forrásfájlok és frissítési ütemezés", className="settings-sub"),
                 ]),
-                html.Button("X", id="settings-close", className="settings-close", n_clicks=0),
+                html.Button(_fi("x"), id="settings-close", className="settings-close", n_clicks=0, **{"aria-label": "Bezárás"}),
             ]),
             html.Div(className="settings-body", children=[
                 html.Div(className="settings-intro", children=[
@@ -7834,8 +7709,6 @@ app.layout = html.Div(id="layout-root", children=[
                 html.Div(className="settings-refresh-card", children=[
                     html.Div(children=[
                         html.Div("Automatikus frissítés", className="settings-source-title"),
-                        html.Div("Ritkább frissítés stabilabb adatmegjelenítést ad Excel mentések közben.",
-                                 className="settings-source-desc"),
                     ]),
                     html.Label(className="settings-field settings-field-small", children=[
                         html.Span("Perc"),
@@ -7856,14 +7729,15 @@ app.layout = html.Div(id="layout-root", children=[
 
     # Developer PIN gate
     html.Div(id="dev-pin-overlay", className="settings-overlay dev-pin-overlay",
-             style={"display": "none"}, children=[
+             style={"display": "none"}, role="dialog",
+             **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "dev-pin-title"}, children=[
         html.Div(className="settings-dialog dev-pin-dialog", children=[
             html.Div(className="settings-head", children=[
                 html.Div(children=[
-                    html.Div("Developer mód", className="settings-title"),
-                    html.Div("Hozzáadás meg a PIN kódot", className="settings-sub"),
+                    html.Div("Developer mód", id="dev-pin-title", className="settings-title"),
+                    html.Div("Add meg a PIN kódot", className="settings-sub"),
                 ]),
-                html.Button("X", id="dev-pin-close", className="settings-close", n_clicks=0),
+                html.Button(_fi("x"), id="dev-pin-close", className="settings-close", n_clicks=0, **{"aria-label": "Bezárás"}),
             ]),
             html.Div(className="dev-pin-body", children=[
                 dcc.Input(id="dev-pin-input", type="password", placeholder="PIN",
@@ -7876,14 +7750,15 @@ app.layout = html.Div(id="layout-root", children=[
 
     # Developer panel
     html.Div(id="dev-overlay", className="settings-overlay dev-overlay",
-             style={"display": "none"}, children=[
+             style={"display": "none"}, role="dialog",
+             **{"aria-hidden": "true", "aria-modal": "true", "aria-labelledby": "dev-title"}, children=[
         html.Div(className="settings-dialog dev-dialog", children=[
             html.Div(className="settings-head", children=[
                 html.Div(children=[
-                    html.Div("Developer menü", className="settings-title"),
+                    html.Div("Developer menü", id="dev-title", className="settings-title"),
                     html.Div(id="dev-sub", className="settings-sub"),
                 ]),
-                html.Button("X", id="dev-close", className="settings-close", n_clicks=0),
+                html.Button(_fi("x"), id="dev-close", className="settings-close", n_clicks=0, **{"aria-label": "Bezárás"}),
             ]),
             html.Div(className="dev-tabs", children=[
                 html.Button("Műveletek", id="dev-tab-ops", className="dev-tab", n_clicks=0),
@@ -7916,14 +7791,14 @@ app.layout = html.Div(id="layout-root", children=[
             # (the header-kpi block is hidden in view-kpi-mode, freeing the centre).
             # The active button doubles as the "which subpage" indicator.
             html.Div(id="kpi-header-switch", className="kpi-header-switch", children=[
-                html.Div(className="kpi-subview-switch", role="tablist",
+                html.Div(className="kpi-subview-switch", role="group",
                          **{"aria-label": "KPI nézet váltó"}, children=[
                     html.Button("KPI Tracking", id="kpi-subview-tracking-btn",
                                 className="kpi-subview-btn kpi-subview-btn-active",
-                                n_clicks=0, **{"role": "tab", "aria-selected": "true"}),
+                                n_clicks=0, **{"aria-pressed": "true"}),
                     html.Button("Riport", id="kpi-subview-report-btn",
                                 className="kpi-subview-btn", n_clicks=0,
-                                **{"role": "tab", "aria-selected": "false"}),
+                                **{"aria-pressed": "false"}),
                     html.Span(className="kpi-subview-glow"),
                 ]),
                 html.Div(id="kpi-page-updated", className="kpi-page-updated", children=""),
@@ -7946,7 +7821,7 @@ app.layout = html.Div(id="layout-root", children=[
                     title="TV mód (Alt+T)",
                     **{"aria-label": "TV mód megnyitása"},
                 ),
-                html.Button("⚙", id="settings-btn",
+                html.Button(_fi("gear"), id="settings-btn",
                             className="settings-btn", n_clicks=0,
                             title="Beállítások", **{"aria-label": "Beállítások"}),
             ]),
@@ -8015,7 +7890,7 @@ app.layout = html.Div(id="layout-root", children=[
                             className="uld-search-input",
                         ),
                         html.Button("Mind kijelölése", className="uld-select-all-btn", title="Látható ULD-k kijelölése"),
-                        html.Button("↺", className="uld-reset-btn", title="Szűrők törlése", id="uld-reset-btn"),
+                        html.Button(_fi("reset"), className="uld-reset-btn", title="Szűrők törlése", id="uld-reset-btn", **{"aria-label": "Szűrők törlése"}),
                     ]),
                 ]),
                 # Bulk-search summary (requested / found / missing) — under the search row
@@ -8056,7 +7931,7 @@ app.layout = html.Div(id="layout-root", children=[
                             className="uld-selection-btn uld-selection-newstack-btn",
                             title="Új üres stack létrehozása és a kijelölt ULD-k áthelyezése",
                         ),
-                        html.Button("×", className="uld-selection-btn uld-selection-btn-clear uld-clear-selection-btn", title="Kijelölés törlése"),
+                        html.Button(_fi("x"), className="uld-selection-btn uld-selection-btn-clear uld-clear-selection-btn", title="Kijelölés törlése", **{"aria-label": "Kijelölés törlése"}),
                     ]),
                 ]),
                 html.Div(id="uld-filter-chips", className="uld-filter-chips"),
@@ -8282,11 +8157,11 @@ app.clientside_callback(
         var rb = document.getElementById('kpi-subview-report-btn');
         if (tb) {
             tb.classList.toggle('kpi-subview-btn-active', !report);
-            tb.setAttribute('aria-selected', report ? 'false' : 'true');
+            tb.setAttribute('aria-pressed', report ? 'false' : 'true');
         }
         if (rb) {
             rb.classList.toggle('kpi-subview-btn-active', report);
-            rb.setAttribute('aria-selected', report ? 'true' : 'false');
+            rb.setAttribute('aria-pressed', report ? 'true' : 'false');
         }
         var sw = document.querySelector('.kpi-subview-switch');
         if (sw) {
@@ -8341,7 +8216,6 @@ app.clientside_callback(
         mode = mode || 'inbound';
         var changed = window._flowAppliedMode !== mode;
         window._flowAppliedMode = mode;
-        document.body.classList.toggle('flow-outbound-mode', mode === 'outbound');
         document.body.classList.toggle('flow-uld-mode',      mode === 'uld');
         cancelAnimationFrame(window._flowSwitchFrame);
         clearTimeout(window._flowSwitchTimer);
@@ -8356,18 +8230,9 @@ app.clientside_callback(
         }
         var inbound  = document.getElementById('flow-inbound');
         var uldBtn   = document.getElementById('flow-uld');
-        var outbound = document.getElementById('flow-outbound');
         if (inbound)  inbound.classList.toggle('flow-active',  mode === 'inbound');
         if (uldBtn)   uldBtn.classList.toggle('flow-active',   mode === 'uld');
-        if (outbound) outbound.classList.toggle('flow-active', mode === 'outbound');
-        var colors = mode === 'outbound' ? {
-            'stat-btn-all':      null,
-            'stat-btn-athu':     '#00d4aa',
-            'stat-btn-drv':      '#4a9eff',
-            'stat-btn-sched':    '#7c72dc',
-            'stat-btn-ship':     '#8b949e',
-            'stat-btn-betarolt': '#8b949e'
-        } : {
+        var colors = {
             'stat-btn-all':      null,
             'stat-btn-athu':     '#ff6b35',
             'stat-btn-drv':      '#00d4aa',
@@ -8405,22 +8270,14 @@ app.clientside_callback(
     Input("data-version", "data"),
 )
 def update_legend(flow_mode, _data_version):
-    if flow_mode == "outbound":
-        items = [
-            ("#00d4aa", "Sofőr a helyszínen"),
-            ("#4a9eff", "Kiadásra vár"),
-            ("#7c72dc", "Pihenőn"),
-            ("#8b949e", "Lezárt"),
-        ]
-    else:
-        items = [
-            ("#ef4444", "B2B · abszolút első prioritás"),
-            ("#ff6b35", "Kategórián belül: AT/HU > TEMU > MD"),
-            ("#00d4aa", "Sofőr helyszínen · sok kiadható"),
-            ("#4a9eff", "Sofőr helyszínen · kevés kiadható"),
-            ("#7c72dc", "Nincs itt / pihenőn · sok kiadható"),
-            ("#8b949e", "Nincs itt / pihenőn · kevés kiadható"),
-        ]
+    items = [
+        ("#ef4444", "B2B · abszolút első prioritás"),
+        ("#ff6b35", "Kategórián belül: AT/HU > TEMU > MD"),
+        ("#00d4aa", "Sofőr helyszínen · sok kiadható"),
+        ("#4a9eff", "Sofőr helyszínen · kevés kiadható"),
+        ("#7c72dc", "Nincs itt / pihenőn · sok kiadható"),
+        ("#8b949e", "Nincs itt / pihenőn · kevés kiadható"),
+    ]
     legend = [
         html.Div(className="legend-item", children=[
             html.Span(className="legend-dot", style={"background": c}),
@@ -8529,36 +8386,57 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
         return _no
 
     state    = data_cache.get_state()
+    triggered_ids = set()
+    try:
+        triggered_ids = {prop_id.split(".")[0] for prop_id in (ctx.triggered_prop_ids or {})}
+    except Exception:
+        try:
+            if ctx.triggered_id:
+                triggered_ids = {ctx.triggered_id}
+        except Exception:
+            pass
+    try:
+        triggered_single = ctx.triggered_id
+    except Exception:
+        triggered_single = None
+    poll_only = triggered_ids == {"poll"} or (not triggered_ids and triggered_single == "poll")
+    data_version = state.get("data_version", 0)
+
+    # A failed first ULD read (no good ULD data yet) is retried with backoff
+    # (refresh_uld_data enforces it); this check runs before the unchanged-poll
+    # gate so the retry still happens while nothing else changes.
+    if (state.get("uld_read_error") and not state.get("uld_last_refresh")
+            and not state.get("uld_refreshing") and _uld_retry_due(state)):
+        threading.Thread(target=data_cache.refresh_uld_data, kwargs={"force": False}, daemon=True).start()
+
     if state.get("status") == "loading" and not state.get("uld_initial_load_complete"):
         # The warm dashboard cache must not make the ULD tab look ready before
         # the first fresh ULD read has completed. The global loading overlay is
         # still visible, while this keeps the underlying tab honest as well.
+        # Rendered once per data_version: a poll must not rebuild the stack grid
+        # every 5 s during the cold start.
+        if poll_only and data_version == current_data_version:
+            return _no
         stacks = _active_stacks(uld_stack_manager.get_stacks_cached())
         return (
-            _make_uld_loading(),
+            _make_uld_read_error(state) if state.get("uld_read_error") else _make_uld_loading(),
             _make_stacks_section(stacks, [], search_text or ""),
             _make_uld_stats([]),
             [],
             None,
             None,
-            no_update,
+            # The skeleton replaced the list: drop the stored signature so the
+            # first real render after the load is never skipped as "unchanged".
+            None,
         )
-    triggered_ids = set()
-    try:
-        triggered_ids = {prop_id.split(".")[0] for prop_id in (ctx.triggered_prop_ids or {})}
-    except Exception:
-        if ctx.triggered_id:
-            triggered_ids = {ctx.triggered_id}
 
     stack_triggered = "uld-trigger-store" in triggered_ids
     # A list-membership change forces the full render (list included) even though
     # the stack trigger usually fires alongside it.
     list_dirty = "uld-list-dirty-store" in triggered_ids
-    poll_only = triggered_ids == {"poll"} or (not triggered_ids and ctx.triggered_id == "poll")
 
     if "flow-mode" in triggered_ids and not state.get("uld_refreshing"):
         threading.Thread(target=data_cache.refresh_uld_data, kwargs={"force": False}, daemon=True).start()
-    data_version = state.get("data_version", 0)
     if poll_only and data_version == current_data_version:
         return _no
 
@@ -8598,10 +8476,19 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
             sig,
         )
 
+    active_sig = _uld_active_signature(state, active_stacks, all_uld, status_filter,
+                                       prefix_filter, gha_filter, search_text, page)
+    # A version bump that changed nothing the active view shows (inbound refresh,
+    # notes, own stack write echoed by the watcher) keeps the DOM untouched.
+    if poll_only and active_sig == current_dispatched_sig:
+        return _no
+
     # Stack-only re-render: trigger store fires after drag/drop operations.
     # The ULD list is expensive (25+ rows); skip it on stack-only events — unless a
     # list-membership change was signalled, in which case we fall through to the
     # full render so the new/removed ULD appears in the list immediately.
+    # The signature is reset (None): the list was not rebuilt, so the next
+    # version-changing poll still does the full render (heals the list rows).
     if stack_triggered and not list_dirty:
         return (
             no_update,
@@ -8610,7 +8497,7 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
             no_update,
             no_update,
             no_update,
-            no_update,
+            None,
         )
 
     if not all_uld:
@@ -8622,7 +8509,12 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
         # Excel endlessly and left the skeleton spinning forever; the periodic
         # worker and the flow-mode switch already keep ULD data fresh.
         ever_loaded = bool(state.get("uld_last_refresh"))
-        if refreshing or not ever_loaded:
+        if not ever_loaded and state.get("uld_read_error"):
+            # First read failed: show the reason instead of an endless skeleton.
+            # Retries are backed off (see the retry check at the top), never one
+            # new reader thread per poll.
+            list_body = _make_uld_read_error(state)
+        elif refreshing or not ever_loaded:
             if not refreshing and not ever_loaded:
                 threading.Thread(target=data_cache.refresh_uld_data, kwargs={"force": False}, daemon=True).start()
             list_body = _make_uld_loading()
@@ -8635,7 +8527,7 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
             [],
             None,
             None,
-            no_update,
+            active_sig,
         )
 
     filtered, bulk_mode = _filter_uld_for_view(
@@ -8653,8 +8545,12 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
         page_items = filtered
         pagination = None
     else:
-        # Newest áttárolt ULD-k a lista tetején.
+        # Newest áttárolt ULD-k a lista tetején; a kész stackben lévők a
+        # TELJES lista végére kerülnek (lapozás előtt), nem oldalanként.
         filtered = sorted(filtered, key=_uld_recency_key, reverse=True)
+        _prepared_ulds = {u for s in active_stacks if s.get("prepared") for u in s.get("ulds", [])}
+        if _prepared_ulds:
+            filtered = sorted(filtered, key=lambda u: 1 if u.get("uld_number") in _prepared_ulds else 0)
         total_pages = max(1, (total + _ULD_PAGE_SIZE - 1) // _ULD_PAGE_SIZE)
         cur_page = max(1, min(int(page or 1), total_pages))
         p_start = (cur_page - 1) * _ULD_PAGE_SIZE
@@ -8671,7 +8567,7 @@ def render_uld_view(_n, status_filter, _trigger, flow_mode, uld_view,
         chips,
         pagination,
         pagination,
-        no_update,
+        active_sig,
     )
 
 
@@ -8718,26 +8614,24 @@ def kézi_refresh(n_clicks, flow_mode):
     return n_clicks
 
 
-# Visual feedback on the refresh button — no server roundtrip needed
+# Instant feedback on manual refresh — no server roundtrip needed.
+# The refresh BUTTON has single owners: its label is static, `disabled` comes
+# only from update_loading_state, the pending spinner/aria-busy only from
+# assets/interaction_stability.js. This callback just wakes the fast poll and
+# shows the refresh pill.
 app.clientside_callback(
     """
     function(n) {
-        if (!n) return '⟳ Frissítés';
-        var btn = document.getElementById('refresh-btn');
+        if (!n) return window.dash_clientside.no_update;
         var overlay = document.getElementById('overlay');
         if (overlay) {
             overlay.className = 'loading-overlay loading-refresh';
             overlay.style.display = 'flex';
         }
-        window.dash_clientside.set_props('loading-poll', {disabled: false});
-        if (btn) {
-            btn.disabled = true;
-            btn.style.opacity = '0.55';
-        }
-        return 'Indítás...';
+        return false;
     }
     """,
-    Output("refresh-btn", "children"),
+    Output("loading-poll", "disabled", allow_duplicate=True),
     Input("refresh-btn", "n_clicks"),
     prevent_initial_call=True,
 )
@@ -8760,9 +8654,13 @@ app.clientside_callback(
     Input("store-action", "data"),
     Input("flow-mode",    "data"),
     Input("priority-test-mode", "data"),
+    Input("view-mode",    "data"),
     State("data-version", "data"),
 )
-def update_stat_counts(_poll, _store, flow_mode, priority_test_mode, current_data_version):
+def update_stat_counts(_poll, _store, flow_mode, priority_test_mode, view_mode, current_data_version):
+    # TV mode: own /api/tv/ops fetch; the hidden dashboard is not rebuilt.
+    if (view_mode or "ops") == "tv":
+        return (no_update,) * 12
     flow_mode = flow_mode or "inbound"
     state = data_cache.get_state()
     data_version = state.get("data_version", 0)
@@ -8776,28 +8674,6 @@ def update_stat_counts(_poll, _store, flow_mode, priority_test_mode, current_dat
 
     if flow_mode == "uld":
         return (no_update,) * 12
-
-    if flow_mode == "outbound":
-        cards = state.get("outbound_cards") or []
-        onsite_cards = [c for c in cards if c.get("active", 0) > 0 and c.get("checkin") and not c.get("in_rest")]
-        ready_cards = [c for c in cards if c.get("active", 0) > 0 and c.get("ready", 0) > 0 and not c.get("checkin") and not c.get("in_rest")]
-        rest_cards = [c for c in cards if c.get("in_rest")]
-        waiting_cards = [c for c in cards if c.get("active", 0) > 0 and not c.get("checkin") and c.get("ready", 0) == 0 and not c.get("in_rest")]
-        issued_cards = [c for c in cards if c.get("active", 0) == 0]
-        return (
-            str(len(cards)),
-            str(len(onsite_cards)),
-            str(len(ready_cards)),
-            str(len(rest_cards)),
-            str(len(waiting_cards)),
-            str(len(issued_cards)),
-            "Összes",
-            "Sofőr itt",
-            "Kiadásra vár",
-            "Pihenőn",
-            "Várakozik",
-            "Lezárt",
-        )
 
     count_state = (
         {"df": _priority_test_df(), "priority_test_mode": True}
@@ -9054,6 +8930,11 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
         hidden_ts = state["last_refresh"].isoformat() if state.get("last_refresh") else None
         if not poll_only:
             return [], html.Span(), hidden_ts, data_version
+        if (view_mode or "ops") == "tv":
+            # TV mode has its own /api/tv/ops fetch. The data-version store stays
+            # frozen, so the store-driven callbacks (sidebar, legend, ULD search)
+            # stay idle; the view-mode change on exit re-renders everything.
+            return (no_update,) * 4
         if data_version != current_data_version:
             return no_update, no_update, hidden_ts, data_version
         return (no_update,) * 4
@@ -9064,25 +8945,6 @@ def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode
     ts = state["last_refresh"].isoformat() if state["last_refresh"] else None
     if poll_only and data_version == current_data_version and not _has_due_arrival_transition(state.get("df")):
         return no_update, no_update, no_update, no_update
-
-    if flow_mode == "outbound":
-        err_msg = (state.get("outbound_errors") or {}).get("error")
-        if err_msg:
-            err = html.Div(className="error-toast", children=err_msg)
-            return html.Div("Nincs megjeleníthető outbound rakodás.", className="empty-state"), \
-                   err, ts, data_version
-
-        cards_data = list(state.get("outbound_cards") or [])
-        if not cards_data:
-            return html.Div("Nincs megjeleníthető outbound rakodás.", className="empty-state"), \
-                   html.Span(), ts, data_version
-
-        cards_data = [r for r in cards_data if (active_filter or "all") in _outbound_filter_tokens(r).split()]
-        total = len(cards_data)
-        current = max(1, min(_safe_int(page, 1), max(1, (total + _CARDS_PAGE_SIZE - 1) // _CARDS_PAGE_SIZE)))
-        start = (current - 1) * _CARDS_PAGE_SIZE
-        cards = [_make_outbound_card(r, filter_tokens=_outbound_filter_tokens(r)) for r in cards_data[start:start + _CARDS_PAGE_SIZE]]
-        return _paged_cards_grid(cards, total, current, "cards-grid outbound-grid", "Nincs rakodás ebben a kategóriában."), html.Span(), ts, data_version
 
     if not test_active and state["status"] == "error":
         last_ok = state.get("last_success_refresh")
@@ -9213,13 +9075,17 @@ def update_countdown(_tick, ts, test_mode=False):
         elapsed = (datetime.now() - last).total_seconds()
         remaining = max(0, REFRESH_INTERVAL_MS / 1000 - elapsed)
         m, s = int(remaining // 60), int(remaining % 60)
+        # data-next-at: refresh_countdown.js ticks the text every second on the
+        # client, so the 10 s server tick no longer makes the seconds jump.
+        next_at_ms = int((last.timestamp() + REFRESH_INTERVAL_MS / 1000) * 1000)
         return [c for c in [
             html.Span(f"Frissítve: {last.strftime('%H:%M:%S')}",
                       className="last-refresh-text"),
             stall_badge,
             source_badge,
             pallets_badge,
-            html.Span(f"Következő: {m}:{s:02d}", className="countdown-text"),
+            html.Span(f"Következő: {m}:{s:02d}", className="countdown-text",
+                      **{"data-next-at": str(next_at_ms)}),
         ] if c is not None]
     except Exception:
         return [c for c in [stall_badge, source_badge, pallets_badge] if c is not None]
@@ -9290,10 +9156,11 @@ def update_kpi_shift_mode(_inbound_clicks, _outbound_clicks, flow_mode, current_
     Input("kézi-refresh-store", "data"),
     Input("kpi-muszak-mode-store", "data"),
     Input("flow-mode",            "data"),
+    Input("view-mode",            "data"),
     State("data-version",         "data"),
 )
-def update_kpi_cards(_poll, _kézi, shift_mode, flow_mode, current_data_version):
-    if (flow_mode or "inbound") == "uld":
+def update_kpi_cards(_poll, _kézi, shift_mode, flow_mode, view_mode, current_data_version):
+    if (flow_mode or "inbound") == "uld" or (view_mode or "ops") == "tv":
         return (no_update,) * 39
     state = data_cache.get_state()
     data_version = state.get("data_version", 0)
@@ -9332,8 +9199,13 @@ def update_kpi_cards(_poll, _kézi, shift_mode, flow_mode, current_data_version)
         ]
     else:
         widths = [0, 0, 0, 0]
+    # The track is ~190px wide; a 3-4 letter label needs ~30px (~15%).
+    # Narrower segments hide their label instead of overflowing the pill.
     chart_styles = [
-        {"width": f"{w:.2f}%"} if v > 0 else {"width": "0%", "display": "none"}
+        (
+            {"width": f"{w:.2f}%", "--seg-label-vis": "visible" if w >= 15 else "hidden"}
+            if v > 0 else {"width": "0%", "display": "none"}
+        )
         for v, w in zip(values, widths)
     ]
     split_raw = [
@@ -9400,9 +9272,13 @@ def update_kpi_cards(_poll, _kézi, shift_mode, flow_mode, current_data_version)
     Output("header-saturation-indicator", "data-sat"),
     Input("poll", "n_intervals"),
     Input("kézi-refresh-store", "data"),
+    Input("view-mode", "data"),
     State("data-version", "data"),
 )
-def update_header_saturation(_poll, _kézi, current_data_version):
+def update_header_saturation(_poll, _kézi, view_mode, current_data_version):
+    # TV mode: own /api/tv/ops fetch; the hidden dashboard is not rebuilt.
+    if (view_mode or "ops") == "tv":
+        return no_update, no_update, no_update
     state = data_cache.get_state()
     data_version = state.get("data_version", 0)
     try:
@@ -9419,9 +9295,13 @@ def update_header_saturation(_poll, _kézi, current_data_version):
     Output("kpi-bec-prefixes-store", "data"),
     Input("poll", "n_intervals"),
     Input("kézi-refresh-store", "data"),
+    Input("view-mode", "data"),
     State("data-version", "data"),
 )
-def update_bec_prefixes(_poll, _kézi, current_data_version):
+def update_bec_prefixes(_poll, _kézi, view_mode, current_data_version):
+    # TV mode: own /api/tv/ops fetch; the hidden dashboard is not rebuilt.
+    if (view_mode or "ops") == "tv":
+        return no_update
     state = data_cache.get_state()
     data_version = state.get("data_version", 0)
     try:
@@ -9886,7 +9766,7 @@ def _dev_state_tab() -> html.Div:
     renames = uld_stack_manager.get_uld_renames()
     rename_rows = [
         _dev_row(
-            html.Span(f"{old} → {new}", className="dev-mono"),
+            html.Span([old, _fi("arrow-right"), new], className="dev-mono dev-rename"),
             "átnevezés",
             {"type": "dev-del", "kind": "rename", "index": old},
         )
@@ -10121,68 +10001,6 @@ def dev_action(_ops, _dels, ovr_values, ovr_ids, token, version):
         activity_log.log_event("dev_del_override", {"awb": awb, "field": field})
         return version, f"Felülbírálás törölve: {awb}.{field}"
     return no_update, no_update
-
-
-# ---------------------------------------------------------------------------
-# Nyomtatás preview callbacks
-# ---------------------------------------------------------------------------
-
-@app.callback(
-    Output("print-glabs-store", "data"),
-    Input({"type": "print-glabs-btn", "index": ALL}, "n_clicks"),
-    Input("ppt-close", "n_clicks"),
-    prevent_initial_call=True,
-)
-def manage_print_preview(print_clicks, _close):
-    tid = ctx.triggered_id
-    if tid == "ppt-close":
-        return None
-    if not isinstance(tid, dict):
-        return no_update
-    triggered_value = (ctx.triggered or [{}])[0].get("value")
-    if not triggered_value:
-        return no_update
-    idx = tid.get("index", "")
-    parts = idx.split("|||", 1)
-    if len(parts) != 2:
-        return no_update
-    plate, glabs_id = parts
-
-    state = data_cache.get_state()
-    cards = state.get("outbound_cards") or []
-    card = next(
-        (c for c in cards if (_clean_text(c.get("plate")) or "") == plate),
-        None,
-    )
-    if card is None:
-        return no_update
-    glabs = next(
-        (g for g in card.get("glabs_items", []) if (_clean_text(g.get("glabs_id")) or "") == glabs_id),
-        None,
-    )
-    if glabs is None:
-        return no_update
-
-    return {
-        "plate": plate,
-        "glabs_id": glabs_id,
-        "awb_items": glabs.get("awb_items", []),
-    }
-
-
-app.clientside_callback(
-    """
-    function(data) {
-        if (typeof window.flowPrintPreview === 'function') {
-            window.flowPrintPreview(data);
-        }
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output("print-action-dummy", "data"),
-    Input("print-glabs-store", "data"),
-    prevent_initial_call=True,
-)
 
 
 # ---------------------------------------------------------------------------

@@ -945,6 +945,41 @@ class KpiPageTests(unittest.TestCase):
         self.assertGreaterEqual(payload["server_count"], 1)
         self.assertIn("no-cache", response.headers.get("Cache-Control", ""))
 
+    def test_tv_ops_build_error_returns_503_without_last_good(self):
+        with patch.dict(app._TV_OPS_LAST_GOOD, {}, clear=True), \
+             patch.object(app, "_build_tv_ops_payload", side_effect=RuntimeError("boom")):
+            response = app.server.test_client().get("/api/tv/ops")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["status"], "error")
+        self.assertTrue(payload["freshness"]["stalled"])
+
+    def test_tv_ops_build_error_keeps_last_good_payload_marked_stalled(self):
+        last_ok = (datetime.now() - timedelta(minutes=5)).isoformat()
+        good = {
+            "status": "ok",
+            "trucks": [{"plate": "TEST-1"}],
+            "freshness": {"stalled": False, "reason": "", "last_success": last_ok, "age_seconds": 1.0},
+        }
+        with patch.dict(app._TV_OPS_LAST_GOOD, {"payload": good}, clear=True), \
+             patch.object(app, "_build_tv_ops_payload", side_effect=RuntimeError("boom")):
+            response = app.server.test_client().get("/api/tv/ops")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["trucks"], [{"plate": "TEST-1"}])
+        self.assertTrue(payload["freshness"]["stalled"])
+        self.assertEqual(payload["freshness"]["reason"], "api_error")
+        self.assertGreaterEqual(payload["freshness"]["age_seconds"], 290)
+        # A tárolt last-good payload nem módosulhat (shallow copy).
+        self.assertFalse(good["freshness"]["stalled"])
+
+    def test_tv_ops_success_updates_last_good(self):
+        with patch.dict(app._TV_OPS_LAST_GOOD, {}, clear=True), \
+             patch.object(app, "_build_tv_ops_payload", return_value={"status": "ok", "trucks": []}):
+            response = app.server.test_client().get("/api/tv/ops")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(app._TV_OPS_LAST_GOOD["payload"]["status"], "ok")
+
     def test_header_saturation_uses_tracking_kpi_values(self):
         style, title, hover = app._header_saturation_style_and_title({
             "tracking": {

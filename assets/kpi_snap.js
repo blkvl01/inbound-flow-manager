@@ -347,8 +347,17 @@
     scrollToSegment(idx + dir);
   }
 
+  function isActivatableTarget(target) {
+    if (!target || !target.closest) return false;
+    return !!target.closest("button, a[href], summary, [role='button'], [role='tab'], [role='link'], [role='checkbox'], [role='switch']");
+  }
+
   function keyToPanel(event) {
     if (!isKpiMode() || isEditableTarget(event.target)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (window.FMModal && typeof window.FMModal.anyOpen === "function" && window.FMModal.anyOpen()) return;
+    // Space on a focused control activates it (native); it must not also page.
+    if (event.key === " " && isActivatableTarget(event.target)) return;
     var dir = 0;
     if (event.key === "ArrowDown" || event.key === "PageDown" || event.key === " ") dir = 1;
     else if (event.key === "ArrowUp" || event.key === "PageUp") dir = -1;
@@ -365,6 +374,8 @@
     if (!dir) return;
     event.preventDefault();
     if (Date.now() < snapLockedUntil) return;
+    // Same as the wheel: reveal the rest of a tall panel before snapping on.
+    if (pageWithinActiveSection(dir)) return;
     scrollToSegment(activeIndex() + dir);
   }
 
@@ -583,12 +594,23 @@
     }
   }
 
+  // The non-passive wheel/touchmove listeners make the compositor wait for the
+  // main thread on every scroll. Attach them only while the KPI view is shown,
+  // so the Inbound/ULD/TV scroll stays on the fast path.
+  var snapInputBound = false;
+  function bindSnapInput(on) {
+    if (on === snapInputBound) return;
+    snapInputBound = on;
+    var method = on ? "addEventListener" : "removeEventListener";
+    document[method]("wheel", wheelToPanel, { passive: false, capture: true });
+    document[method]("touchstart", touchStart, { passive: true, capture: true });
+    document[method]("touchmove", touchMove, { passive: false, capture: true });
+    document[method]("touchend", touchEnd, { passive: true, capture: true });
+  }
+
   function setup() {
-    document.addEventListener("wheel", wheelToPanel, { passive: false, capture: true });
+    bindSnapInput(!!isKpiMode());
     document.addEventListener("keydown", keyToPanel, true);
-    document.addEventListener("touchstart", touchStart, { passive: true, capture: true });
-    document.addEventListener("touchmove", touchMove, { passive: false, capture: true });
-    document.addEventListener("touchend", touchEnd, { passive: true, capture: true });
     window.addEventListener("resize", function () {
       metricsDirty = true;
       scheduleMetrics();
@@ -624,6 +646,7 @@
     // no chart-module replay (the chart modules don't listen to this event).
     window.addEventListener("kpi-subview-shown", onKpiShown);
     function updateLifecycle() {
+      bindSnapInput(!!isKpiMode());
       syncSnapMetrics();
       if (isKpiMode() && !document.hidden) {
         onKpiShown();

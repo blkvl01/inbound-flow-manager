@@ -11,13 +11,23 @@
     return !!target.closest("input, textarea, select, [contenteditable='true'], [role='textbox']");
   }
 
+  function isModalOpen() {
+    if (window.FMModal && typeof window.FMModal.anyOpen === "function") return window.FMModal.anyOpen();
+    if (document.querySelector('[role="dialog"][aria-hidden="false"]')) return true;
+    var ids = ["summary-overlay", "settings-overlay", "dev-pin-overlay", "dev-overlay"];
+    for (var i = 0; i < ids.length; i++) {
+      var el = document.getElementById(ids[i]);
+      if (el && el.style.display && el.style.display !== "none") return true;
+    }
+    return false;
+  }
+
   function isPrioritySurface() {
     var body = document.body;
     return body &&
       !body.classList.contains("view-tv-mode") &&
       !body.classList.contains("view-kpi-mode") &&
-      !body.classList.contains("flow-uld-mode") &&
-      !body.classList.contains("flow-outbound-mode");
+      !body.classList.contains("flow-uld-mode");
   }
 
   function publish(attempt) {
@@ -38,7 +48,8 @@
   document.addEventListener("keydown", function (event) {
     if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
     if ((event.key || "").toLowerCase() !== "t") return;
-    if (isEditable(event.target) || !isPrioritySurface()) return;
+    if (isEditable(event.target) || isEditable(document.activeElement)) return;
+    if (!isPrioritySurface() || isModalOpen()) return;
     event.preventDefault();
     active = !active;
     publish();

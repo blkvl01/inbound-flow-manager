@@ -17,6 +17,14 @@ TV mode changes are limited to the TV surface:
 Do not change normal inbound/outbound dashboard views, KPI views, ULD flows,
 settings, or developer views unless the user explicitly asks for those surfaces.
 
+## Motion budget (2026-11-19, user decision)
+
+TV runs 24/7 on a weak iGPU: no idle infinite decorative animation. The
+background (`.tv-bg::before` gradient field + 3 `.tv-bg-blob`) is static
+(tvBgDrift / tvB1-3 disabled in the AUDIT block after the TV reduced-motion
+query), the card glow is static (no tvCardMorph). Plate typing runs only on
+`initial`/`enter`. Motion only on open/data change, transform/opacity only.
+
 ## Current Layout
 
 The TV overlay has two pages inside `.tv-main`:

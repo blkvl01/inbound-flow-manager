@@ -62,8 +62,10 @@ try:
     with urllib.request.urlopen(req, timeout=30) as r:
         inter_css = r.read().decode("utf-8")
 
-    woff2_urls = re.findall(r'url\((https://[^)]+\.woff2[^)]*)\)', inter_css)
-    print(f"  Found {len(woff2_urls)} woff2 files")
+    # Google serves one variable file per subset and repeats its URL for every
+    # weight: download each unique URL once (was 49 files, 42 byte-identical).
+    woff2_urls = list(dict.fromkeys(re.findall(r'url\((https://[^)]+\.woff2[^)]*)\)', inter_css)))
+    print(f"  Found {len(woff2_urls)} unique woff2 files")
 
     for i, url in enumerate(woff2_urls):
         fname = f"inter_{i:02d}.woff2"
