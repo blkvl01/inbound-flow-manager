@@ -1,4 +1,23 @@
-# Inbound Flow Manager – v0.1.16
+# Inbound Flow Manager – v0.1.17
+
+Stabilitási, teljesítmény- és felületi javítások.
+
+- ULD: a V oszlopba írt tengeri konténerszámok (pl. CMAU1234567) nem jelennek
+  meg ULD-ként. A rövid töredékek kiesnek, az elírt, de ULD-alakú kódok
+  maradnak.
+- Gyorsabb, akadásmentesebb felület: a dekoratív háttéranimációk állók, kevesebb
+  elmosott réteg, ritkább újrarajzolás. Tétlen képkockaidő a KPI Riporton
+  71,6 ms-ról kb. 17 ms-ra, a TV-n 35,4 ms-ról kb. 17 ms-ra csökkent.
+- Az Outbound nézet és a nyomtatási előnézet kikerült. A TV és a KPI outbound
+  adatai megmaradtak.
+- Ablakok billentyűzettel: Tab az ablakon belül marad, Escape bezár. A
+  megjegyzés törlése két kattintásos, a ULD-áthelyezés visszavonható.
+- TV: lassabb karusszel, lapszámos lapozás, olvashatóbb mértékegységek és
+  feliratok, figyelmeztetés, ha az adat elavult.
+- Ikonok karakterek helyett, egységes időformátum (pl. 5h 36m), javított
+  kontraszt.
+
+## Előző kiadás: v0.1.16
 
 A Program HUB állapotjelentése indításkor és ezután 30 percenként frissül.
 A korábbi megosztott munkatérből a migráció csak a közös üzleti állapot
