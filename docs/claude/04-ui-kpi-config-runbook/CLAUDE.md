@@ -54,7 +54,10 @@ Extrás glass (clean, de prémium — CSS-only, renderer-biztos, STATIKUS):
 Úton (en-route) tétel: NINCS Betárolva gomb (`store_el = html.Span()`), mert még
 meg sem érkezett — nem tárolható be.
 
-Összegzés modal (`_build_summary_table`): TOP-10 tábla, igényesebb glass dialog
+Összegzés modal (`_build_summary_table`): TOP-10 tábla + rejtett `.summary-awb-data`
+(az ÖSSZES aktív, nem betárolt AWB rang szerint, `_active_awb_lines`); az
+„AWB-k másolása (N)” gomb ezt másolja soronként (`summary_copy.js`, betöltés
+közben — `data-dash-is-loading` — nem másol régi listát). Igényesebb glass dialog
 (`backdrop-filter`), oszlopok: #, Prioritás, AWB, LMP, Típus, kg, Felvéve.
 Soronként bal oldali szín-akcentus (`--row-accent`), rank-badge, prioritás-pill,
 aged órajel. A `summary_copy.js` a `textContent`-et másolja → az ikon-spanok
@@ -74,7 +77,23 @@ Kártya finomítások (2. kör):
 - Kategória-akcentus: a `::before` rim a TELJES keret körül megy, halvány
   prioritás-színű gradiens (`--glow`/`--glow-far`), hoveren erősebb/világosabb.
 - Szűrőváltás animáció (`card_fx.js applyFlowFilter`): a megmaradó kártyák FLIP-pel
-  csúsznak, az újonnan megjelenők `card-filter-in` pop-pal jönnek be.
+  csúsznak, az újonnan megjelenők pop-pal jönnek be — mindkettő WAAPI.
+- KEMÉNY SZABÁLY (2026-11-27): `.priority-card`-on SOHA nincs CSS `animation`
+  (`animation: none !important`). Belépés, szűrő-pop, fókusz-/betárolás-pulse,
+  FLIP: `el.animate()` (WAAPI) a `card_fx.js`-ben. Ok: minden átmeneti osztály,
+  ami felülírta az `animation`-t (régi `card-expand-feedback`, `card-filter-in`,
+  `plate-focus-pulse`), lekerüléskor újraindította a belépő `cardQuickIn`-t
+  (0,72 opacity + nth-child késleltetés) → lenyitáskor az egész sor villogott.
+- Lenyitás: sor-szinkron `offsetTop` alapján (a hover-emelés transformja nem
+  zavarja), nincs FLIP (a grid-rows átmenet maga mozgatja a lenti sorokat),
+  `#cards-area.fx-resizing` alatt a többi kártya `pointer-events:none` (nincs
+  hover-villanás az alatta elcsúszó kártyákon), dupla kattintás 2. kattintása
+  nem csuk vissza, kijelölt szöveg nem csuk. React className-felülírás után a
+  MutationObserver mikrotaszkban visszateszi a `card-expanded` / `card-exiting`
+  / `card-filter-hidden` osztályt.
+- Kártya fejsáv: két fix sor (`#rang … [jelvények]` / prioritás oka), a jelvények
+  `.card-strip-badges` csoportban; hiányzó részek `None`, nem üres `html.Span()`.
+- Hoverre nem változhat betűköz (újratördelt, ugrált a fejléc / stat sáv).
 - Betárolva: zöld pipa-"stamp" flash (`card-store-flash`) + gomb press-feedback.
 - KPI count-up: a `#kpi-muszak-value` és `#kpi-bec-total` (`.kpi-countup`) érték
   0-ról felszámol értékváltáskor (IN/OUT váltás vagy refresh), max ~1.2s —

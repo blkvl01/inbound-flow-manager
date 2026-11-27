@@ -64,12 +64,12 @@ GRP_EN_ROUTE = 99
 
 _GROUP_META = {
     GRP_ATHU_REST_SOON: ("AT/HU - PIHENŐ HAMAROSAN VÉG", "rest-soon"),
-    GRP_AT_HU: ("AT/HU PRIORITAS", "at-hu"),
-    GRP_DRIVER_ACTIVE_HIGH: ("SOFOR HELYSZINEN - SOK KIADHATO", "driver-active"),
-    GRP_DRIVER_ACTIVE_LOW: ("SOFOR HELYSZINEN - KEVES KIADHATO", "loading-plan"),
-    GRP_DRIVER_PASSIVE_HIGH: ("NINCS ITT / PIHENON - SOK KIADHATO", "driver-rest"),
-    GRP_DRIVER_PASSIVE_LOW: ("NINCS ITT / PIHENON - KEVES KIADHATO", "standard"),
-    GRP_EN_ROUTE: ("UTON", "en-route"),
+    GRP_AT_HU: ("AT/HU PRIORITÁS", "at-hu"),
+    GRP_DRIVER_ACTIVE_HIGH: ("SOFŐR HELYSZÍNEN - SOK KIADHATÓ", "driver-active"),
+    GRP_DRIVER_ACTIVE_LOW: ("SOFŐR HELYSZÍNEN - KEVÉS KIADHATÓ", "loading-plan"),
+    GRP_DRIVER_PASSIVE_HIGH: ("NINCS ITT / PIHENŐN - SOK KIADHATÓ", "driver-rest"),
+    GRP_DRIVER_PASSIVE_LOW: ("NINCS ITT / PIHENŐN - KEVÉS KIADHATÓ", "standard"),
+    GRP_EN_ROUTE: ("ÚTON", "en-route"),
 }
 
 

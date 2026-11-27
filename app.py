@@ -324,6 +324,55 @@ except Exception as _e:
     log.warning("TV version baseline could not be initialized: %s", _e)
 
 
+def _poll_gate_signature() -> str:
+    """Everything the Input("poll") callbacks react to, as one string.
+
+    data_version already covers source reads, shared stored/notes/override
+    files (data_cache._file_watcher), ULD stacks and the en-route -> arrived
+    transition (bumped below, as the poll callbacks did). The loading fields
+    let update_loading_state notice a timer refresh and switch on its fast
+    poll. If this string is unchanged, every poll callback would have
+    returned no_update anyway."""
+    state = data_cache.get_state()
+    try:
+        if state.get("df") is not None:
+            _has_due_arrival_transition(state.get("df"))
+            state = data_cache.get_state()
+    except Exception as exc:  # the gate must never block the dashboard
+        log.debug("poll gate due-arrival check failed: %s", exc)
+    try:
+        phase = updater.get_status().get("phase")
+    except Exception:
+        phase = None
+    errors = state.get("errors") or {}
+    return "|".join(str(part) for part in (
+        state.get("data_version", 0),
+        state.get("status"),
+        bool(state.get("refreshing")),
+        bool(state.get("uld_refreshing")),
+        state.get("refresh_count", 0),
+        bool(state.get("read_stalled")),
+        bool(errors.get("error")) if isinstance(errors, dict) else bool(errors),
+        phase,
+    ))
+
+
+@server.route("/api/poll-gate", methods=["GET"])
+def api_poll_gate():
+    """Cheap 5 s version check for assets/poll_gate.js.
+
+    The dcc.Interval "poll" is disabled; the client bumps its n_intervals only
+    when this signature changes (plus a 60 s safety tick). Before, 8 poll
+    callbacks round-tripped through dash-renderer every 5 s and almost always
+    answered no_update: 50-180 ms main-thread bursts that stuttered running
+    animations."""
+    from flask import jsonify
+    _last_poll_time[0] = time.time()
+    response = jsonify({"sig": _poll_gate_signature()})
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    return response
+
+
 def _tv_forwarded_marker(*notes) -> bool:
     """Igaz, ha a BUD-Pallets megjegyzés(ek)ben 'tovább engedett / továbbengedett'
     jelölés van (ékezet/szóköz-tűrően)."""
@@ -4140,6 +4189,11 @@ def _inbound_stat_counts(state: dict) -> dict:
 
 
 def _fmt_since(dt) -> str:
+    """Elapsed time since pick-up, e.g. "1 óra 10 perce".
+
+    No "Felvéve" prefix: both callers (card time row, Összegzés "Felvéve"
+    column) already carry that label, so the card read "FELVÉVE 11.27 08:27
+    Felvéve 1 óra 10 perce"."""
     if dt is None:
         return ""
     try:
@@ -4155,12 +4209,12 @@ def _fmt_since(dt) -> str:
         h = int(elapsed)
         m = int((elapsed - h) * 60)
         if h and m:
-            return f"Felvéve {h} óra {m} perce"
+            return f"{h} óra {m} perce"
         if h:
-            return f"Felvéve {h} órája"
+            return f"{h} órája"
         if m:
-            return f"Felvéve {m} perce"
-        return "Most vették fel"
+            return f"{m} perce"
+        return "most"
     except Exception:
         return ""
 
@@ -4532,7 +4586,7 @@ def _make_notes_block(awb: str) -> html.Details:
         children=[
             html.Summary(className="card-notes-summary", children=[
                 html.Span("Megjegyzés", className="card-notes-label"),
-                html.Span(str(count), className="card-notes-count") if count else html.Span(),
+                html.Span(str(count), className="card-notes-count") if count else None,
             ]),
             html.Div(className="card-notes-body", children=[
                 *note_rows,
@@ -4584,19 +4638,22 @@ def _make_card(
         if is_en_route and not is_b2b_priority:
             color = "#e5e7eb"
 
+    # Absent parts are None, not an empty html.Span(): every empty span was a
+    # Dash component (renderer + React cost on each card render) and, inside
+    # the flex strip, took a 7 px gap from the priority label.
     ship_badge = (html.Span("KIADHATÓ", className="badge-shippable")
-                  if row.get("is_shippable") else html.Span())
+                  if row.get("is_shippable") else None)
 
     cargo_type = row.get("cargo_type", "PLT")
     cargo_badge = html.Span(
         cargo_type,
         className=f"badge-cargo badge-{'uld' if cargo_type == 'ULD' else 'plt'}",
     )
-    partial_badge = html.Span("RÉSZBEN", className="badge-partial") if is_partial else html.Span()
+    partial_badge = html.Span("RÉSZBEN", className="badge-partial") if is_partial else None
     en_route_badge = html.Span(
         "Úton",
         className="badge-en-route",
-    ) if is_en_route and not betarolt_view else html.Span()
+    ) if is_en_route and not betarolt_view else None
 
     is_aged = bool(row.get("is_aged", False))
     aged_hours = _safe_int(row.get("hours_since_am"), 0)
@@ -4605,16 +4662,16 @@ def _make_card(
         className="badge-aged",
         title=f"{aged_hours}+ órája felvéve — régóta vár, ezért előre soroltuk",
         **{"aria-label": f"{aged_hours}+ órája felvéve"},
-    ) if is_aged and not betarolt_view and not is_en_route else html.Span()
+    ) if is_aged and not betarolt_view and not is_en_route else None
     if is_aged and not betarolt_view and not is_en_route:
         card_cls += " is-aged-card"
 
     if test_mode:
         # Test rows are display-only and must never reach shared storage.
-        store_el = html.Span()
+        store_el = None
     elif is_en_route and not betarolt_view:
         # Úton lévő tételt nem lehet betárolni — még meg sem érkezett.
-        store_el = html.Span()
+        store_el = None
     elif is_snapshot or (betarolt_view and not can_unstore):
         store_el = html.Span([_fi("tick", "fi-gap"), "Betárolva"], className="badge-stored badge-stored-disabled")
     elif is_stored_flag:
@@ -4639,19 +4696,21 @@ def _make_card(
     note_badge = (
         html.Span(str(notes_count), className="badge-note",
                   title=f"{notes_count} megjegyzés — nyisd le a kártyát")
-        if notes_count else html.Span()
+        if notes_count else None
     )
 
+    # Badges sit in one group. style.css lays the strip out in two fixed rows
+    # (rank + badges / priority reason): sharing one row squeezed the reason
+    # into 3-4 lines at 1366 px and misaligned the headers of a grid row.
+    hide_rank = is_en_route and not betarolt_view and not is_b2b_priority
+    priority_label = "" if hide_rank else _clean_text(row.get("priority_label"))
+    badges = [b for b in (store_el, aged_badge, ship_badge, cargo_badge,
+                          partial_badge, en_route_badge, note_badge) if b is not None]
     header = html.Div(className="card-strip", style={"background": color}, children=[
-        html.Span("" if is_en_route and not betarolt_view and not is_b2b_priority else f"#{row.get('rank', '–')}", className="rank-num"),
-        html.Span("" if is_en_route and not betarolt_view and not is_b2b_priority else row.get("priority_label", ""), className="priority-label-text"),
-        store_el,
-        aged_badge,
-        ship_badge,
-        cargo_badge,
-        partial_badge,
-        en_route_badge,
-        note_badge,
+        None if hide_rank else html.Span(f"#{row.get('rank', '–')}", className="rank-num"),
+        html.Span(priority_label, className="priority-label-text",
+                  title=priority_label) if priority_label else None,
+        html.Div(badges, className="card-strip-badges"),
     ])
 
     # ── Compute GLABS and plate info before compact body ───────────────────
@@ -4699,24 +4758,24 @@ def _make_card(
                     "data-plate-color": plate_col,
                 },
                 title=f"ULD: {uld_number}" + (f" · Rendszám: {plate}" if plate else ""),
-            ) if cargo_type == "ULD" and uld_number else html.Span(),
+            ) if cargo_type == "ULD" and uld_number else None,
         ]),
         html.Div(className="card-quick-meta", children=[
             html.Span(row["lmp"], className="lmp-text"),
             html.Span("·", className="meta-sep"),
             html.Span(weight_label, className="weight-text", style={"color": color}),
-            html.Span("·", className="meta-sep") if colli > 0 else html.Span(),
-            html.Span(colli_label, className="colli-text") if colli > 0 else html.Span(),
+            html.Span("·", className="meta-sep") if colli > 0 else None,
+            html.Span(colli_label, className="colli-text") if colli > 0 else None,
         ]),
         html.Div(className="card-time-compact", children=[
             html.Span("Úton" if is_en_route else "Felvéve", className="row-label"),
-            html.Span("" if is_en_route else _fmt_dt(row["am_time"]), className="row-value"),
-            html.Span() if is_en_route else (html.Span(since, className="since-compact") if since else html.Span()),
+            None if is_en_route else html.Span(_fmt_dt(row["am_time"]), className="row-value"),
+            html.Span(since, className="since-compact") if since and not is_en_route else None,
         ]),
         html.Div(className="card-compact-glabs", children=[
             html.Span(glabs_id, className="glabs-id glabs-id-compact",
                       style={"color": glabs_col}),
-        ]) if glabs_id else html.Span(),
+        ]) if glabs_id else None,
     ])
 
     lp = []
@@ -4744,7 +4803,7 @@ def _make_card(
                 html.Div(className="driver-info", children=[
                     html.Span(f"Bejelentkezve: {_fmt_dt(drv)}", className="driver-text"),
                     html.Span(wait, className="wait-badge",
-                              style={"color": color}) if wait else html.Span(),
+                              style={"color": color}) if wait else None,
                 ]),
             ]))
             if row["driver_in_rest"]:
@@ -4771,12 +4830,12 @@ def _make_card(
     notes_block = (
         _make_notes_block(awb)
         if awb and not betarolt_view and not is_en_route and not test_mode
-        else html.Span()
+        else None
     )
 
     details_section = html.Div(className="card-details-section", children=[
         html.Div(className="card-details-inner", children=[
-            html.Div(className="lp-section", children=lp) if lp else html.Span(),
+            html.Div(className="lp-section", children=lp) if lp else None,
             notes_block,
         ]),
     ])
@@ -4805,13 +4864,41 @@ def _make_card(
     )
 
 
+def _active_awb_lines(df) -> list[str]:
+    """Every active (not stored) inbound AWB in priority order, de-duplicated.
+
+    Same population as the "Aktív tétel" stat and the TOP 10 table: rows not
+    marked Betárolva, en-route included. Blank / NaN AWBs are skipped."""
+    if df is None or getattr(df, "empty", True) or "awb" not in df.columns:
+        return []
+    active = df[~df["is_stored"].astype(bool)] if "is_stored" in df.columns else df
+    if "rank" in active.columns:
+        active = active.sort_values("rank", kind="stable")
+    seen, out = set(), []
+    for value in active["awb"].tolist():
+        awb = _clean_text(value)
+        if awb and awb not in seen:
+            seen.add(awb)
+            out.append(awb)
+    return out
+
+
+def _summary_awb_data(df) -> html.Div:
+    awbs = _active_awb_lines(df)
+    return html.Div(className="summary-awb-data", hidden=True,
+                    **{"data-awbs": "\n".join(awbs), "data-count": str(len(awbs))})
+
+
 def _build_summary_table(df):
-    """TOP 10 inbound priority rows as a compact table for the Összegzés modal."""
+    """TOP 10 inbound priority rows as a compact table for the Összegzés modal,
+    plus the hidden full active-AWB list for the "AWB-k másolása" button."""
     if df is None or getattr(df, "empty", True):
-        return html.Div("Nincs aktív tétel az összegzéshez.", className="summary-empty")
+        return html.Div([html.Div("Nincs aktív tétel az összegzéshez.", className="summary-empty"),
+                         _summary_awb_data(None)])
     active = df[~df["is_stored"]].copy() if "is_stored" in df.columns else df.copy()
     if active.empty:
-        return html.Div("Nincs aktív tétel az összegzéshez.", className="summary-empty")
+        return html.Div([html.Div("Nincs aktív tétel az összegzéshez.", className="summary-empty"),
+                         _summary_awb_data(None)])
     rows = (active.sort_values("rank") if "rank" in active.columns else active).head(10).to_dict("records")
 
     header = html.Thead(html.Tr([
@@ -4826,7 +4913,7 @@ def _build_summary_table(df):
         uld_num = _clean_text(r.get("uld_number"))
         type_txt = f"{cargo} · {uld_num}" if cargo == "ULD" and uld_num else cargo
         label_txt = _clean_text(r.get("priority_label")) or "—"
-        if r.get("is_en_route") and "Úton" not in label_txt:
+        if r.get("is_en_route") and "úton" not in label_txt.lower():
             label_txt = f"{label_txt} · Úton"
         is_aged = bool(r.get("is_aged", False))
         weight_val = r.get("weight") or 0
@@ -4845,24 +4932,27 @@ def _build_summary_table(df):
         body_rows.append(html.Tr(className=row_cls, style={"--row-accent": color}, children=[
             html.Td(html.Span(str(r.get("rank", "–")), className="summary-rank-badge",
                               style={"background": color}), className="summary-rank"),
-            html.Td(html.Div(prio_children, className="summary-prio-inner"),
+            html.Td(html.Div(prio_children, className="summary-prio-inner", title=label_txt),
                     className="summary-prio-cell"),
             html.Td(_clean_text(r.get("awb")) or "—", className="summary-awb"),
             html.Td(_clean_text(r.get("lmp")) or "—", className="summary-lmp"),
-            html.Td(type_txt, className="summary-type"),
+            html.Td(type_txt, className="summary-type", title=type_txt),
             html.Td(kg_txt, className="summary-kg"),
             html.Td(children=[
                 html.Span(time_txt, className="summary-time-main"),
-                html.Span(since_txt, className="summary-time-since") if since_txt else html.Span(),
+                html.Span(since_txt, className="summary-time-since") if since_txt else None,
             ], className="summary-muted summary-time-cell"),
         ]))
 
-    return html.Div(className="summary-table-wrap", children=[
-        html.Table(
-            id="summary-prio-table",
-            className="summary-table",
-            children=[header, html.Tbody(body_rows)],
-        )
+    return html.Div(children=[
+        html.Div(className="summary-table-wrap", children=[
+            html.Table(
+                id="summary-prio-table",
+                className="summary-table",
+                children=[header, html.Tbody(body_rows)],
+            )
+        ]),
+        _summary_awb_data(df),
     ])
 
 
@@ -5007,11 +5097,15 @@ def _make_stat_btn(btn_id, _fkey, label, color, count_id):
         className="stat-item",
         n_clicks=0,
         **{"aria-pressed": "true" if btn_id == "stat-btn-all" else "false"},
-        style={"--stat-color": color, "--stat-glow": glow} if color else {},
+        # "Aktív tétel" has no category colour: a neutral light accent. The old
+        # var(--border) dot (white 9%) plus the grey active glow read as a
+        # blurred smudge next to the coloured accents of the other filters.
+        style=({"--stat-color": color, "--stat-glow": glow} if color else
+               {"--stat-color": "rgba(226,232,240,0.70)", "--stat-glow": "rgba(226,232,240,0.20)"}),
         children=[
             html.Span(
                 className="stat-dot",
-                style={"background": color} if color else {"background": "var(--border)"},
+                style={"background": color} if color else {"background": "rgba(226,232,240,0.82)"},
             ),
             html.Div(className="stat-nums", children=[
                 html.Span("–", id=count_id, className="stat-value",
@@ -7194,9 +7288,14 @@ def _make_filter_chips(
 # ---------------------------------------------------------------------------
 
 app.layout = html.Div(id="layout-root", children=[
-    dcc.Interval(id="poll", interval=5000, n_intervals=0),
+    # Driven by assets/poll_gate.js (n_intervals bumped only when
+    # /api/poll-gate changes, plus a 60 s safety tick): never ticks itself.
+    dcc.Interval(id="poll", interval=5000, n_intervals=0, disabled=True),
     dcc.Interval(id="loading-poll", interval=750, n_intervals=0),
-    dcc.Interval(id="tick", interval=10000, n_intervals=0),
+    # Only the header source-age badges ("3 perce") need it: minute
+    # granularity, the seconds countdown ticks client-side
+    # (refresh_countdown.js). 10 s cost one dash-renderer burst per tick.
+    dcc.Interval(id="tick", interval=30000, n_intervals=0),
     dcc.Interval(id="activity-tick", interval=30000, n_intervals=0),
     dcc.Store(id="last-refresh-ts"),
     dcc.Store(id="data-version", data=0),
@@ -7628,7 +7727,13 @@ app.layout = html.Div(id="layout-root", children=[
                     html.Div("Az aktív inbound lista legfontosabb tételei", className="summary-sub"),
                 ]),
                 html.Div(className="summary-actions", children=[
-                    html.Button("Másolás", id="summary-copy-btn", className="summary-copy-btn", n_clicks=0),
+                    # Every active (not stored) AWB, one per line, nothing else.
+                    # assets/summary_copy.js reads .summary-awb-data from the body.
+                    html.Button("AWB-k másolása", id="summary-copy-awb-btn",
+                                className="summary-copy-btn summary-copy-awb-btn", n_clicks=0,
+                                type="button", title="Az összes aktív AWB vágólapra, soronként egy"),
+                    html.Button("Tábla másolása", id="summary-copy-btn", className="summary-copy-btn",
+                                n_clicks=0, type="button", title="A TOP 10 táblázat vágólapra"),
                     html.Button(_fi("x"), id="summary-close", className="summary-close", n_clicks=0, **{"aria-label": "Bezárás"}),
                 ]),
             ]),
@@ -8244,16 +8349,13 @@ app.clientside_callback(
             var id = entry[0], color = entry[1];
             var el = document.getElementById(id);
             if (!el) return;
-            if (color) {
-                el.style.setProperty('--stat-color', color);
-                el.style.setProperty('--stat-glow', color + '38');
-            } else {
-                el.style.removeProperty('--stat-color');
-                el.style.removeProperty('--stat-glow');
-            }
+            // "Aktív tétel" has no category colour: neutral light accent (must
+            // match _make_stat_btn; var(--border) rendered as a grey smudge).
+            el.style.setProperty('--stat-color', color || 'rgba(226,232,240,0.70)');
+            el.style.setProperty('--stat-glow', color ? color + '38' : 'rgba(226,232,240,0.20)');
             var dot = el.querySelector('.stat-dot');
             var value = el.querySelector('.stat-value');
-            if (dot) dot.style.background = color || 'var(--border)';
+            if (dot) dot.style.background = color || 'rgba(226,232,240,0.82)';
             if (value) value.style.color = color || '';
         });
         return mode;
@@ -8912,9 +9014,28 @@ app.clientside_callback(
     Input("cards-plate-focus",      "data"),
     Input("view-mode",              "data"),
     State("data-version",           "data"),
+    State("last-refresh-ts",        "data"),
 )
 def update_dashboard(_poll, flow_mode, _kézi, _store, _note, priority_test_mode,
-                     active_filter, page, plate_focus, view_mode, current_data_version):
+                     active_filter, page, plate_focus, view_mode, current_data_version,
+                     current_ts=None):
+    cards, errors, ts, version = _update_dashboard_outputs(
+        _poll, flow_mode, _kézi, _store, _note, priority_test_mode,
+        active_filter, page, plate_focus, view_mode, current_data_version)
+    # Dash fires every Input("data-version") / Input("last-refresh-ts")
+    # callback on ANY write, even the same value. A filter / page / plate-focus
+    # click re-sent both, so each click also re-rendered the legend, the truck
+    # sidebar (34 KB), the ULD search summary and the countdown: ~2-3 s of
+    # dash-renderer main-thread work measured headless. Unchanged = no_update.
+    if ts is not no_update and ts == current_ts:
+        ts = no_update
+    if version is not no_update and version == current_data_version:
+        version = no_update
+    return cards, errors, ts, version
+
+
+def _update_dashboard_outputs(_poll, flow_mode, _kézi, _store, _note, priority_test_mode,
+                              active_filter, page, plate_focus, view_mode, current_data_version):
     _last_poll_time[0] = time.time()
     flow_mode = flow_mode or "inbound"
     state = data_cache.get_state()
@@ -9076,7 +9197,7 @@ def update_countdown(_tick, ts, test_mode=False):
         remaining = max(0, REFRESH_INTERVAL_MS / 1000 - elapsed)
         m, s = int(remaining // 60), int(remaining % 60)
         # data-next-at: refresh_countdown.js ticks the text every second on the
-        # client, so the 10 s server tick no longer makes the seconds jump.
+        # client, so the 30 s server tick never makes the seconds jump.
         next_at_ms = int((last.timestamp() + REFRESH_INTERVAL_MS / 1000) * 1000)
         return [c for c in [
             html.Span(f"Frissítve: {last.strftime('%H:%M:%S')}",

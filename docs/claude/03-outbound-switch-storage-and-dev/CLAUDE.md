@@ -196,8 +196,22 @@ Háttérfrissítés:
 
 UI poll:
 
-- `dcc.Interval(id="poll", interval=5000)`
+- `dcc.Interval(id="poll", interval=5000, disabled=True)` — NEM ketyeg magától.
+  Az `assets/poll_gate.js` 5 mp-enként egy `GET /api/poll-gate`-et küld
+  (`_poll_gate_signature`: data_version, status, refreshing, uld_refreshing,
+  refresh_count, stall, hiba, updater-fázis; a due-arrival bumpot is ez hívja),
+  és csak aláírás-változáskor (+ 60 mp-es biztonsági tick) növeli a
+  `poll.n_intervals`-t `set_props`-szal. A poll-callbackek kódja változatlan.
+  Előtte 8 callback ment 5 mp-enként a dash-rendereren át, szinte mind
+  `no_update`-tel: 50–180 ms-os blokkok, akadó animációk (2026-11-27).
+- Új állapot, amire poll-callback reagál → kerüljön be a `_poll_gate_signature`-be.
 - Ha `data_version` nem változott, callback `no_update`.
+- `update_dashboard` a `last-refresh-ts` és `data-version` store-t csak VÁLTOZÁSKOR
+  írja (azonos érték = `no_update`): a Dash minden írásra elsüti az összes függő
+  callbacket, így egy szűrő-/lapozó-/fókuszkattintás korábban a legendát, a
+  kamion-oldalsávot, a ULD-összegzőt és a visszaszámlálót is újrarenderelte.
+- `tick` 30 mp (csak a forrás-kor jelvények percfelbontása kell; a másodperc-
+  visszaszámlálás kliensoldali, `refresh_countdown.js`).
 - `data_version` csak renderelt változásra emelkedik: adatbeolvasás vége, ULD-olvasás vége/hibája, stored flags, override, megjegyzés, stack-változás. NEM emel: frissítés-indulás (`refreshing`, `uld_refreshing`), ismételt stall-próba (csak az első stall, status- vagy hibaszöveg-váltás). A `refreshing`/stall jelzést a loading overlay és a `tick` saját pollja olvassa.
 - ULD aktív nézet: `_uld_active_signature` (rekordok, aktív stackek, stack-időadatok, override, szűrők, oldal) a `uld-dispatched-sig` store-ban `active:` előtaggal; poll + változatlan aláírás = `no_update`. Stack-only render után az aláírás `None`, így a következő verzióváltás teljes renderrel frissíti a listát.
 - TV mód (`view-mode == "tv"`): a `data-version` store befagy, a stat/KPI/telítettség/BEC poll-callbackek `no_update`-et adnak (a TV saját `/api/tv/ops` fetch-et használ). Ezek `view-mode` Inputot kaptak, kilépéskor újrarenderelnek.

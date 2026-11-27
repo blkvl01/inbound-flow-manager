@@ -1,12 +1,24 @@
 /* Lightweight card interactions.
    - Betarolva click: fixed ghost exit, so Dash can re-render immediately.
    - Remaining cards: transform-only FLIP animation after the new DOM lands.
-   - Stat filters: local ripple feedback, no server wait. */
+   - Stat filters: local ripple feedback, no server wait.
+
+   Motion rule (2026-11-27): a .priority-card never carries a CSS `animation`.
+   Entry, filter pop-in and feedback pulses run through WAAPI (el.animate),
+   which never touches the `animation` property. Earlier every transient
+   class (card-expand-feedback, card-filter-in, plate-focus-pulse,
+   card-action-feedback) replaced the base cardQuickIn animation; removing the
+   class restarted cardQuickIn (opacity 0.72 + staggered nth-child delay), so
+   every expand/collapse blinked the whole row. */
 (function () {
   "use strict";
 
   var EXIT_MS = 320;
   var FLIP_MS = 340;
+  var EXPAND_MS = 260;    // keep in sync with .card-details-section in style.css
+  var COLLAPSE_MS = 200;
+  var EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+  var EASE_IN_OUT = "cubic-bezier(0.4, 0, 0.2, 1)";
   var pendingRects = null;
   var pendingUntil = 0;
   var flipFrame = 0;
@@ -24,6 +36,35 @@
   function prefersReducedMotion() {
     return window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  // One-shot WAAPI animation. Never writes classes or the CSS `animation`
+  // property, so nothing restarts when it ends.
+  function playOnce(el, keyframes, opts) {
+    if (!el || typeof el.animate !== "function" || prefersReducedMotion()) return null;
+    try { return el.animate(keyframes, opts); } catch (e) { return null; }
+  }
+
+  function pulse(el) {
+    return playOnce(el, [
+      { filter: "brightness(1)" },
+      { filter: "brightness(1.16)", offset: 0.38 },
+      { filter: "brightness(1)" }
+    ], { duration: 520, easing: EASE_OUT });
+  }
+
+  function cardEnter(card, order) {
+    return playOnce(card, [
+      { opacity: 0.72, transform: "translateY(3px)" },
+      { opacity: 1, transform: "none" }
+    ], { duration: 180, delay: Math.min(order, 8) * 24, easing: EASE_OUT, fill: "backwards" });
+  }
+
+  function cardFilterIn(card) {
+    return playOnce(card, [
+      { opacity: 0, transform: "translateY(8px) scale(0.97)" },
+      { opacity: 1, transform: "none" }
+    ], { duration: 260, easing: EASE_OUT, fill: "backwards" });
   }
 
   function cardKey(card, index) {
@@ -113,15 +154,18 @@
   function updatePlateFocusPill() {
     var pill = ensurePlateFocusPill();
     if (!plateFocusKey) {
-      pill.classList.remove("plate-focus-pill-visible");
-      pill.innerHTML = "";
+      if (pill.classList.contains("plate-focus-pill-visible")) pill.classList.remove("plate-focus-pill-visible");
+      if (pill.innerHTML) pill.innerHTML = "";
       return;
     }
-    pill.style.setProperty("--plate-focus-color", plateFocusColor || "#8b949e");
-    pill.innerHTML =
+    var html =
       '<span class="plate-focus-dot"></span>' +
       '<span class="plate-focus-text">Kamion fókusz: <b>' + htmlEscape(plateFocusLabel || plateFocusKey) + '</b></span>' +
       '<span class="plate-focus-clear"><span class="fi fi-x" aria-hidden="true"></span></span>';
+    pill.style.setProperty("--plate-focus-color", plateFocusColor || "#8b949e");
+    // Rewrite only on change: every applyPlateVisualState() pass used to
+    // replace the pill DOM, restarting its hover/press transitions.
+    if (pill.innerHTML !== html) pill.innerHTML = html;
     pill.classList.add("plate-focus-pill-visible");
   }
 
@@ -129,13 +173,7 @@
     if (!key || prefersReducedMotion()) return;
     var cards = document.querySelectorAll("#cards-area .priority-card[data-plate-key]");
     for (var i = 0; i < cards.length; i++) {
-      if (!focusMatches(cards[i], key)) continue;
-      cards[i].classList.remove("plate-focus-pulse");
-      void cards[i].offsetWidth;
-      cards[i].classList.add("plate-focus-pulse");
-      (function (card) {
-        setTimeout(function () { card.classList.remove("plate-focus-pulse"); }, 680);
-      })(cards[i]);
+      if (focusMatches(cards[i], key)) pulse(cards[i]);
     }
   }
 
@@ -180,12 +218,14 @@
     var chips = document.querySelectorAll(".truck-focus-source[data-plate-key], .legend-truck-chip[data-plate-key]");
     for (var j = 0; j < chips.length; j++) {
       var chip = chips[j];
-      chip.classList.toggle("legend-truck-active", !!plateFocusKey && focusMatches(chip, plateFocusKey));
-      chip.classList.toggle("legend-truck-hover", !plateFocusKey && !!hover && focusMatches(chip, hover));
-      chip.classList.toggle("truck-sidebar-active", !!plateFocusKey && focusMatches(chip, plateFocusKey));
-      chip.classList.toggle("truck-sidebar-hover", !plateFocusKey && !!hover && focusMatches(chip, hover));
+      var active = !!plateFocusKey && focusMatches(chip, plateFocusKey);
+      var hovered = !plateFocusKey && !!hover && focusMatches(chip, hover);
+      setClass(chip, "legend-truck-active", active);
+      setClass(chip, "legend-truck-hover", hovered);
+      setClass(chip, "truck-sidebar-active", active);
+      setClass(chip, "truck-sidebar-hover", hovered);
     }
-    document.body.classList.toggle("plate-focus-active", !!plateFocusKey);
+    setClass(document.body, "plate-focus-active", !!plateFocusKey);
     updatePlateFocusPill();
     scrollActiveTruckIntoView();
   }
@@ -197,7 +237,7 @@
     applyPlateVisualState();
   }
 
-  function clearPlateFocus(pulse) {
+  function clearPlateFocus(withPulse) {
     var oldKey = plateFocusKey;
     plateFocusKey = "";
     plateFocusLabel = "";
@@ -215,7 +255,7 @@
         }
       });
     }
-    if (pulse && oldKey) pulsePlateMatches(oldKey);
+    if (withPulse && oldKey) pulsePlateMatches(oldKey);
   }
 
   function setPlateFocus(info, forceClear) {
@@ -288,9 +328,7 @@
     if (reduced) return;
 
     // Newly-shown cards pop in; surviving cards slide from their old spot (FLIP).
-    // Two phases: every rect is read first (one layout, which also restarts the
-    // pop-in animation), then all writes.
-    newlyShown.forEach(function (el) { el.classList.remove("card-filter-in"); });
+    // Two phases: every rect is read first (one layout), then all writes.
     var vis = area.querySelectorAll(".priority-card[data-filter]:not(.card-filter-hidden)");
     var moves = [];
     for (var j = 0; j < vis.length; j++) {
@@ -304,24 +342,12 @@
       if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
       moves.push({ el: card, dx: dx, dy: dy });
     }
-    newlyShown.forEach(function (el) {
-      el.classList.add("card-filter-in");
-      setTimeout(function () { el.classList.remove("card-filter-in"); }, 380);
-    });
+    newlyShown.forEach(cardFilterIn);
     moves.forEach(function (m) {
-      m.el.style.transition = "none";
-      m.el.style.transform = "translate3d(" + m.dx + "px," + m.dy + "px,0)";
-      m.el.style.willChange = "transform";
-    });
-    if (!moves.length) return;
-    requestAnimationFrame(function () {
-      moves.forEach(function (m) {
-        m.el.style.transition = "transform 340ms cubic-bezier(0.22,1,0.36,1)";
-        m.el.style.transform = "";
-      });
-      setTimeout(function () {
-        moves.forEach(function (m) { m.el.style.transition = ""; m.el.style.willChange = ""; });
-      }, 380);
+      playOnce(m.el, [
+        { transform: "translate3d(" + m.dx + "px," + m.dy + "px,0)" },
+        { transform: "none" }
+      ], { duration: FLIP_MS, easing: EASE_OUT });
     });
   }
 
@@ -376,18 +402,23 @@
     pendingRects = rects;
     pendingUntil = started + STORE_SETTLE_MS;
     animateGhost(card);
+    card._fxExiting = true;
     card.classList.add("card-exiting");
     // Store failed / card kept by the server: give it back instead of
     // leaving an invisible slot. While the write is still in flight (the
     // button keeps .action-pending, interaction_stability.js) keep waiting,
     // so a slow shared-lock write does not make the card pop back early.
     function settle() {
-      if (!card.isConnected || !card.classList.contains("card-exiting")) return;
+      if (!card.isConnected || !card.classList.contains("card-exiting")) {
+        card._fxExiting = false;
+        return;
+      }
       if (card.querySelector(".action-pending") && performance.now() - started < STORE_MAX_WAIT_MS) {
         if (pendingRects === rects) pendingUntil = performance.now() + STORE_SETTLE_MS;
         setTimeout(settle, 1000);
         return;
       }
+      card._fxExiting = false;
       card.classList.remove("card-exiting");
       if (pendingRects === rects) pendingRects = null;
     }
@@ -414,22 +445,12 @@
     if (!moves.length) return;
     moves.forEach(function (m) {
       m.el.classList.add("card-flipping");
-      m.el.style.transition = "none";
-      m.el.style.transform = "translate3d(" + m.dx + "px," + m.dy + "px,0)";
-      m.el.style.willChange = "transform";
-    });
-    requestAnimationFrame(function () {
-      moves.forEach(function (m) {
-        m.el.style.transition = "transform " + FLIP_MS + "ms cubic-bezier(0.22,1,0.36,1)";
-        m.el.style.transform = "";
-      });
-      setTimeout(function () {
-        moves.forEach(function (m) {
-          m.el.classList.remove("card-flipping");
-          m.el.style.transition = "";
-          m.el.style.willChange = "";
-        });
-      }, FLIP_MS + 40);
+      var anim = playOnce(m.el, [
+        { transform: "translate3d(" + m.dx + "px," + m.dy + "px,0)" },
+        { transform: "none" }
+      ], { duration: FLIP_MS, easing: "cubic-bezier(0.22,1,0.36,1)" });
+      var done = function () { m.el.classList.remove("card-flipping"); };
+      if (anim) { anim.onfinish = done; anim.oncancel = done; } else { done(); }
     });
     pendingUntil = performance.now() + FLIP_MS + 80;
   }
@@ -469,11 +490,10 @@
       window._flowActiveFilter = "betarolt";
     }
     var storeCard = btn.closest(".priority-card");
-    // Green check "stamp" flash when storing (empty → betárolva).
+    // Green check "stamp" flash when storing (empty -> betárolva).
     if (storeCard && btn.classList.contains("badge-stored-empty") && !prefersReducedMotion()) {
       storeCard.classList.add("card-store-flash");
-      storeCard.classList.add("card-action-feedback");
-      setTimeout(function () { storeCard.classList.remove("card-action-feedback"); }, 620);
+      pulse(storeCard);
     }
     prepareStoreAnimation(storeCard);
   }, { capture: true });
@@ -491,13 +511,9 @@
     var truckBtn = e.target.closest(".truck-store-btn");
     if (!truckBtn) return;
     var truckCard = truckBtn.closest(".truck-sidebar-card");
-    if (truckCard && !prefersReducedMotion()) {
-      truckCard.classList.add("card-action-feedback");
-      setTimeout(function () { truckCard.classList.remove("card-action-feedback"); }, 620);
-    }
+    if (truckCard) pulse(truckCard);
   }, { capture: true });
 
-  // ── Row detection: cards visually in the same row ─────────────────────
   function initPlateInteractions() {
     document.addEventListener("mouseover", function (e) {
       var source = nearestPlateSource(e.target, false);
@@ -570,110 +586,154 @@
     }
   }
 
+  // ── Row detection: cards visually in the same row ─────────────────────
+  // offsetTop is the layout position: the hover lift (translateY) and any
+  // running FLIP transform do not move it. getBoundingClientRect() did, so a
+  // hovered card sat 4 px above its row and the row sync randomly skipped
+  // the peers (one card expanded, the stretched neighbours showed a void).
   function cardsInSameRow(card) {
     if (!card) return [];
     var area = document.getElementById("cards-area");
     if (!area) return [card];
-    var all = Array.from(area.querySelectorAll(
+    var top = card.offsetTop;
+    var parent = card.parentElement;
+    var all = area.querySelectorAll(
       ".priority-card[data-card-key]:not(.card-filter-hidden):not(.card-exiting)"
-    ));
-    var top = card.getBoundingClientRect().top;
-    var TOL = 4;
-    return all.filter(function (c) {
-      return Math.abs(c.getBoundingClientRect().top - top) < TOL;
-    });
+    );
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      var c = all[i];
+      if (c.parentElement === parent && Math.abs(c.offsetTop - top) < 2) out.push(c);
+    }
+    return out;
   }
 
-  // ── Smooth <details> open/close animation ─────────────────────────────
+  // While a row grows or shrinks, the cards below slide under a still mouse:
+  // each one passing the pointer used to flash its hover lift, glow and the
+  // floating tooltip. The grid ignores the pointer for the resize window;
+  // the clicked card keeps it (its own hover state stays stable).
+  var resizeTimer = 0;
+  var resizeOrigin = null;
+  function markResizing(origin, ms) {
+    var area = document.getElementById("cards-area");
+    if (!area) return;
+    if (resizeOrigin && resizeOrigin !== origin) resizeOrigin.classList.remove("fx-resize-origin");
+    resizeOrigin = origin || null;
+    if (resizeOrigin) resizeOrigin.classList.add("fx-resize-origin");
+    area.classList.add("fx-resizing");
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () {
+      area.classList.remove("fx-resizing");
+      if (resizeOrigin) resizeOrigin.classList.remove("fx-resize-origin");
+      resizeOrigin = null;
+    }, ms + 90);
+  }
+
+  function setCardExpanded(card, expanded) {
+    card._fxExpanded = expanded;
+    setClass(card, "card-expanded", expanded);
+    var toggleEl = card.querySelector(".card-body-compact");
+    if (toggleEl) toggleEl.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+
+  function toggleCardRow(card) {
+    var willExpand = !card.classList.contains("card-expanded");
+    var peers = cardsInSameRow(card);
+    if (!peers.length) peers = [card];
+    markResizing(card, willExpand ? EXPAND_MS : COLLAPSE_MS);
+    for (var i = 0; i < peers.length; i++) setCardExpanded(peers[i], willExpand);
+  }
+
+  // ── Smooth <details> open/close (interruptible) ───────────────────────
+  // Re-clicking mid-animation reverses from the current height instead of
+  // being swallowed (the old _animating guard ignored the click).
   function animateDetailsToggle(details, willOpen) {
-    if (!details || details._animating) return;
-    var currentlyOpen = details.hasAttribute("open");
-    if (willOpen === currentlyOpen) return;
-    if (prefersReducedMotion()) {
+    if (!details) return;
+    var intended = details._fxOpen != null ? details._fxOpen : details.hasAttribute("open");
+    if (willOpen === intended) return;
+    details._fxOpen = willOpen;
+    // [open] stays on during the close animation (the content must render);
+    // .is-open follows the intent at once, so the chevron turns on click.
+    setClass(details, "is-open", willOpen);
+    var running = details._fxAnim;
+    var fromH = details.offsetHeight;
+    if (running) {
+      running.onfinish = null;
+      running.cancel();
+      details._fxAnim = null;
+    }
+    if (prefersReducedMotion() || typeof details.animate !== "function") {
       if (willOpen) details.setAttribute("open", "");
       else details.removeAttribute("open");
+      details.style.overflow = "";
       return;
     }
-    details._animating = true;
-    var fromH, toH;
+    var toH;
     if (willOpen) {
-      fromH = details.offsetHeight;
       details.setAttribute("open", "");
       toH = details.offsetHeight;
     } else {
-      fromH = details.offsetHeight;
       details.removeAttribute("open");
       toH = details.offsetHeight;
       details.setAttribute("open", "");
     }
     details.style.overflow = "hidden";
-    details.style.willChange = "height";
     var anim = details.animate(
       [{ height: fromH + "px" }, { height: toH + "px" }],
-      {
-        duration: willOpen ? 320 : 260,
-        easing: willOpen ? "cubic-bezier(0.22,1,0.36,1)" : "cubic-bezier(0.4,0,0.2,1)"
-      }
+      { duration: willOpen ? 240 : 190, easing: willOpen ? EASE_OUT : EASE_IN_OUT }
     );
+    details._fxAnim = anim;
     anim.onfinish = function () {
+      if (details._fxAnim !== anim) return;
+      details._fxAnim = null;
       if (!willOpen) details.removeAttribute("open");
       details.style.overflow = "";
-      details.style.willChange = "";
-      details._animating = false;
-    };
-    anim.oncancel = function () {
-      details.style.overflow = "";
-      details.style.willChange = "";
-      details._animating = false;
     };
   }
 
-  // ── Inbound "Rakodás tételei" — row-synced smooth toggle ──────────────
+  // Inbound "Rakodás tételei": row-synced. Notes ("Megjegyzés"): this card only.
   document.addEventListener("click", function (e) {
-    var summary = e.target.closest(".inbound-ready-block > summary");
+    var summary = e.target.closest(".inbound-ready-block > summary, .card-notes-block > summary");
     if (!summary) return;
     var details = summary.parentNode;
-    if (!details || !details.classList.contains("inbound-ready-block")) return;
+    if (!details || details.tagName !== "DETAILS") return;
     e.preventDefault();
     e.stopPropagation();
-    var willOpen = !details.hasAttribute("open");
+    var intended = details._fxOpen != null ? details._fxOpen : details.hasAttribute("open");
+    var willOpen = !intended;
     var card = details.closest(".priority-card");
+    if (!details.classList.contains("inbound-ready-block")) {
+      if (card) markResizing(card, willOpen ? 240 : 190);
+      animateDetailsToggle(details, willOpen);
+      return;
+    }
     var peers = card ? cardsInSameRow(card) : [];
     if (!peers.length) peers = [card].filter(Boolean);
+    if (card) markResizing(card, willOpen ? 240 : 190);
     peers.forEach(function (c) {
       var d = c.querySelector(".inbound-ready-block");
       if (d) animateDetailsToggle(d, willOpen);
     });
   }, true);
 
-  // Card expand/collapse on click — row-synced
+  // Card expand/collapse on click — row-synced. No FLIP here: the grid-row
+  // transition already moves the rows below continuously; a FLIP on top
+  // fought it (the first-frame delta was re-applied as a lagging transform).
+  var TOGGLE_IGNORE = "button, summary, a, input, select, textarea, label, [contenteditable='true'], " +
+    ".inbound-uld-note, .truck-focus-source, .legend-truck-chip, .plate-focus-pill, " +
+    ".card-notes-block, .inbound-ready-list";
   document.addEventListener("click", function (e) {
     var card = e.target.closest(".priority-card");
-    if (!card) return;
-    // Skip if clicking interactive elements inside the card
-    if (e.target.closest("button, summary, a, input, select, .inbound-uld-note, .truck-focus-source, .legend-truck-chip, .plate-focus-pill")) return;
+    if (!card || !card.closest("#cards-area")) return;
+    if (e.target.closest(TOGGLE_IGNORE)) return;
     if (card.classList.contains("card-exiting")) return;
-    var willExpand = !card.classList.contains("card-expanded");
-    var peers = cardsInSameRow(card);
-    if (!peers.length) peers = [card];
-    var oldRects = prefersReducedMotion() ? null : snapshotCards();
-    peers.forEach(function (p) {
-      p.classList.toggle("card-expanded", willExpand);
-      var toggleEl = p.querySelector(".card-body-compact");
-      if (toggleEl) toggleEl.setAttribute("aria-expanded", willExpand ? "true" : "false");
-      if (!prefersReducedMotion()) {
-        p.classList.remove("card-expand-feedback");
-        void p.offsetWidth;
-        p.classList.add("card-expand-feedback");
-        setTimeout(function () { p.classList.remove("card-expand-feedback"); }, 460);
-      }
-    });
-    if (oldRects && !prefersReducedMotion()) {
-      pendingRects = oldRects;
-      pendingUntil = performance.now() + 1000;
-      cancelAnimationFrame(flipFrame);
-      flipFrame = requestAnimationFrame(runFlip);
-    }
+    // The 2nd click of a double-click (plate focus on ULD cards) must not
+    // collapse the card again: that was an open-close blink.
+    if (e.detail > 1) return;
+    // Selecting text (an AWB to copy) ends in a click: do not collapse.
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && !sel.isCollapsed && sel.toString().trim() && card.contains(sel.anchorNode)) return;
+    toggleCardRow(card);
     hideTip();
   });
 
@@ -728,18 +788,25 @@
     return rows.join("");
   }
 
+  function isResizing() {
+    var area = document.getElementById("cards-area");
+    return !!(area && area.classList.contains("fx-resizing"));
+  }
+
   function showTip(card) {
     // mouseenter (capture) fires for every child: same card = nothing to do.
     if (card === _tipCard) return;
-    if (card.classList.contains("card-expanded")) return;
+    if (card.classList.contains("card-expanded") || isResizing()) return;
     var html = buildTipHTML(card);
     if (!html) return;
     var tip = ensureFloatTip();
-    tip.innerHTML = html;
+    if (tip.innerHTML !== html) tip.innerHTML = html;
     tip.style.display = "block";
     positionTip(tip, card);
     _tipCard = card;
-    requestAnimationFrame(function () { tip.classList.add("ftip-visible"); });
+    requestAnimationFrame(function () {
+      if (_tipCard === card) tip.classList.add("ftip-visible");
+    });
   }
 
   function hideTip() {
@@ -780,6 +847,45 @@
     window.addEventListener("scroll", function () { if (_tipCard) hideTip(); }, { passive: true });
   }
 
+  // ── Render observer ─────────────────────────────────────────────────────
+  // React re-applies a card's className whenever the server changes it (new
+  // priority colour, aged flag...). That silently dropped the client-only
+  // classes: an open card snapped shut, a filtered-out card flashed visible
+  // for one frame, a storing card popped back. Class records are repaired
+  // synchronously (microtask, before paint), so the user never sees it.
+  function repairCardClasses(card) {
+    if (card._fxExpanded && !card.classList.contains("card-expanded")) {
+      card.classList.add("card-expanded");
+    }
+    if (card._fxExiting && !card.classList.contains("card-exiting")) {
+      card.classList.add("card-exiting");
+    }
+    var filter = window._flowActiveFilter || "all";
+    var tokens = (card.getAttribute("data-filter") || "all").split(/\s+/);
+    var hidden = tokens.indexOf(filter) === -1;
+    if (card.classList.contains("card-filter-hidden") !== hidden) {
+      card.classList.toggle("card-filter-hidden", hidden);
+    }
+  }
+
+  function collectAddedCards(records) {
+    var out = [];
+    for (var i = 0; i < records.length; i++) {
+      var added = records[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var n = added[j];
+        if (n.nodeType !== 1) continue;
+        if (n.classList.contains("priority-card")) {
+          out.push(n);
+        } else if (n.querySelectorAll) {
+          var inner = n.querySelectorAll(".priority-card");
+          for (var k = 0; k < inner.length; k++) out.push(inner[k]);
+        }
+      }
+    }
+    return out;
+  }
+
   function initCardFlipObserver() {
     var area = document.getElementById("cards-area");
     if (!area) { setTimeout(initCardFlipObserver, 120); return; }
@@ -787,14 +893,34 @@
     // and our own class writes are ignored; bursts collapse into one frame.
     var renderFrame = 0;
     function isElementRecord(r) {
-      if (r.type === "attributes") return true;
+      if (r.type === "attributes") return r.attributeName !== "class";
       var i;
       for (i = 0; i < r.addedNodes.length; i++) if (r.addedNodes[i].nodeType === 1) return true;
       for (i = 0; i < r.removedNodes.length; i++) if (r.removedNodes[i].nodeType === 1) return true;
       return false;
     }
     var observer = new MutationObserver(function (records) {
-      if (renderFrame || !records.some(isElementRecord)) return;
+      var structural = false;
+      for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        if (r.type === "attributes" && r.attributeName === "class") {
+          var t = r.target;
+          if (t.classList && t.classList.contains("priority-card")) repairCardClasses(t);
+          continue;
+        }
+        if (!structural && isElementRecord(r)) structural = true;
+      }
+      if (!structural) return;
+      // New card nodes: filter state + one-shot entry before the first paint.
+      var fresh = collectAddedCards(records);
+      if (fresh.length) {
+        var order = 0;
+        for (var f = 0; f < fresh.length; f++) {
+          repairCardClasses(fresh[f]);
+          if (!fresh[f].classList.contains("card-filter-hidden")) cardEnter(fresh[f], order++);
+        }
+      }
+      if (renderFrame) return;
       renderFrame = requestAnimationFrame(function () {
         renderFrame = 0;
         applyFlowFilter(currentFilter(), false);
@@ -807,7 +933,7 @@
     });
     observer.observe(area, {
       childList: true, subtree: true,
-      attributes: true, attributeFilter: ["data-filter", "data-plate-key"]
+      attributes: true, attributeFilter: ["data-filter", "data-plate-key", "class"]
     });
     applyFlowFilter(currentFilter(), false);
   }

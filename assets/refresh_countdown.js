@@ -1,7 +1,7 @@
 // Header "Következő: m:ss" countdown.
 // The server (update_countdown) renders the span with data-next-at (epoch ms)
-// on its 10 s tick; this ticks the text every second on the client, so the
-// seconds run smoothly instead of jumping by 10. Text-only write, on change.
+// on its 30 s tick; this ticks the text every second on the client, so the
+// seconds run smoothly instead of jumping. Text-only write, on change.
 (function () {
   'use strict';
   if (window.__refreshCountdownInit) return;
