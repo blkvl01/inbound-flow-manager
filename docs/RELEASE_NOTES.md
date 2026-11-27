@@ -1,4 +1,24 @@
-# Inbound Flow Manager – v0.1.17
+# Inbound Flow Manager – v0.1.18
+
+A nyitó oldal javításai: villogásmentes kártyák, AWB-másolás, gyorsabb felület.
+
+- Kártya lenyitása és visszacsukása nem villog többé. A sor kártyái együtt
+  nyílnak akkor is, ha az egér a kártyán van; a mozgás alatt a többi kártya
+  nem villan fel. Dupla kattintás és szövegkijelölés nem csukja vissza a
+  kártyát, a megjegyzés mezőjébe kattintás sem.
+- Gyorsabb, egyenletesebb lenyitás forgó nyíllal; a „Rakodás tételei” és a
+  „Megjegyzés” is finoman nyílik.
+- Egységes kártya-fejléc: fent a sorszám és a jelvények, alatta a prioritás
+  oka. A sor kártyái egy magasságban kezdődnek, 1366 px-en sem törik szét.
+- Ékezetes prioritás-feliratok, „Felvéve 11.27 08:27 · 1 óra 10 perce”
+  (dupla „Felvéve” nélkül), tisztább „Aktív tétel” jelölés.
+- Összegzés: új „AWB-k másolása (N)” gomb, az összes aktív (nem betárolt) AWB
+  prioritási sorrendben, soronként. A régi gomb neve „Tábla másolása”. Az
+  ablak szélesebb, az AWB és az időpont nem törik.
+- Gyorsabb felület: üresjáratban 5 másodpercenként 8 helyett 0 szerver-
+  callback (csak tényleges változáskor frissít), szűrőváltáskor 13 helyett 1.
+
+## Előző kiadás: v0.1.17
 
 Stabilitási, teljesítmény- és felületi javítások.
 
